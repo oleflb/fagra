@@ -46,8 +46,17 @@ let cost = solver.factor_cost(observation)?;
 solver.remove_factor(observation)?;
 ```
 
-Removing one observation preserves sibling factor handles. The graph operations
-above remain API stubs; the SLAM example type-checks the complete workflow.
+Removing one observation preserves sibling factor handles. Empty batches keep
+their models and remain reusable through the same `BatchKey` until the solver
+is dropped. Batch keys and all shared/local dependencies are validated before
+payload insertion; rejected payloads are dropped without publishing an entry.
+The `optimize` call remains a stub, and the SLAM example's geometry is placeholder
+code. Storage and cost dispatch themselves are implemented.
+
+Selections preserve payload/identity order even after compaction. `len()` counts
+remaining entries, and `as_slice()` exposes those same remaining entries only
+when contiguous in iteration order. Indexed selections inspect selected indices,
+not the entire batch, and iteration allocates no storage.
 
 ## Ordinary versus batched factor scopes
 

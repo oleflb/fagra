@@ -30,6 +30,56 @@ Individual insertion and lookup use typed pool access, not traversal. Factor
 cost/removal by key use `FactorStore<S, P>` because a payload-typed key does not
 identify its batch model at the type level.
 
+## Dense generational storage
+
+States, ordinary factors, and batch models share one `DensePool<T>` implementation:
+
+```text
+values:      Vec<T>         packed live values
+keys:        Vec<LocalKey>  parallel (slot, generation) pairs
+slots:       Vec<Slot>      generation and current dense position
+free_slots:  Vec<u32>       reusable logical slots
+```
+
+A key combines a unique 64-bit pool identity with a 32-bit slot and generation.
+Typed handles, `BlockId`, and `FactorId` carry the same identity representation.
+They implement equality and hashing independently of payload traits. Pool IDs
+are assigned with a checked relaxed atomic counter at construction; lookups and
+insertion need no atomics or runtime type registry. These are process-local
+identities, not persistent serialized keys or addresses.
+
+Checked lookup validates the pool, slot bounds, generation, and occupancy before
+resolving the dense position. It requires a slot-table indirection. Bulk iteration
+instead zips packed values with their local keys without resolving handles.
+Removal uses `swap_remove` on the parallel arrays and repairs the moved entry's
+slot mapping. It then advances the removed slot's generation; exhausted slots
+are retired permanently. Pool IDs and index arithmetic never silently wrap.
+
+Reservation covers all parallel buffers, including enough free-list capacity
+for removal. Capacity is retained after deletion; pool insertion/removal within
+reserved capacity and live iteration require no storage allocations. User payload
+construction, evaluation, and destruction may have their own allocations.
+
+Batch payloads remain contiguous within each batch, alongside their local keys.
+A family-wide generational directory, also backed by `DensePool`, maps each
+factor identity to a stable batch slot and dense payload position. Removing a
+payload repairs its moved sibling's directory entry. Empty models stay reusable;
+there is currently no public batch-removal operation.
+
+Internal pool methods provide reservation, insertion, checked access/removal,
+and live iteration. Batch pools additionally expose models and borrowed selections.
+`FactorSelection` supports contiguous ranges and prepared index lists. Indices
+are validated and their order is preserved; scheduling callers select each factor
+once. Its exact remaining length is O(1). Testing contiguity of an indexed suffix
+is O(selected entries), and never scans unrelated payloads.
+
+Solver insertion validates dependencies before publishing a factor, including
+shared batch inputs. This currently uses state visitors: O(state families) per
+dependency at edit time. A pool-routing index can replace this if insertion
+throughput warrants it; the checked state-read path stays O(1). There is no
+numerical cache or persistent incidence index yet. Public state deletion is
+reserved for graph-aware operations so it cannot leave dangling dependencies.
+
 ## Traversal contract
 
 - Every declared pool is visited once, even when empty, in declaration order.
@@ -115,5 +165,5 @@ The intended hot path reuses workspace after structure preparation. Graph edits
 may allocate; user evaluators must also avoid allocations. Marginalization's
 manifold-coordinate contract and heterogeneous bulk API are still open.
 
-The numerical passes, pool mutation, and identity management remain unimplemented;
-the visitor API supplies their dispatch contract, not an optimizer or arena.
+Storage and identity management are implemented. Numerical assembly, trial-state
+storage, optimization, and marginalization are the remaining solver work.

@@ -1,7 +1,7 @@
 //! One scalar variable constrained by an ordinary prior factor.
 //!
 //! Compile with `cargo check --example scalar_prior`. The model is complete,
-//! but solver operations are API stubs, so the graph workflow cannot run yet.
+//! and storage/cost operations work. The optimization call is still an API stub.
 
 use faer_ext::nalgebra::{SMatrix, SVector};
 use fagra::{

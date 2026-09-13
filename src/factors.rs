@@ -1,5 +1,6 @@
-use std::marker::PhantomData;
+use std::iter::FusedIterator;
 
+use crate::key::{LocalKey, PoolId, RawKey};
 use crate::storage::{BatchPool, FactorPool};
 use crate::{
     BlockId, EvaluationError, FactorId, FactorKey, KeyError, LinearizationSink, SolverError,
@@ -75,26 +76,73 @@ pub trait FactorBatch<S> {
 /// reuses scheduling storage; selecting a few factors must not scan the full pool.
 /// Identities remain valid even when removal changes dense storage positions.
 pub struct FactorSelection<'a, F> {
-    _private: PhantomData<&'a F>,
+    pool: PoolId,
+    keys: &'a [LocalKey],
+    values: &'a [F],
+    indices: Option<&'a [usize]>,
+    position: usize,
 }
 
 impl<'a, F> FactorSelection<'a, F> {
+    pub(crate) fn contiguous(pool: PoolId, keys: &'a [LocalKey], values: &'a [F]) -> Self {
+        assert_eq!(keys.len(), values.len());
+        Self {
+            pool,
+            keys,
+            values,
+            indices: None,
+            position: 0,
+        }
+    }
+
+    pub(crate) fn indexed(
+        pool: PoolId,
+        keys: &'a [LocalKey],
+        values: &'a [F],
+        indices: &'a [usize],
+    ) -> Result<Self, KeyError> {
+        if indices.iter().any(|&index| index >= values.len()) {
+            return Err(KeyError::Unknown);
+        }
+        Ok(Self {
+            indices: Some(indices),
+            ..Self::contiguous(pool, keys, values)
+        })
+    }
+
     /// Number of factors remaining in this selection.
     pub fn len(&self) -> usize {
-        todo!("API only: selection length")
+        self.indices.map_or(self.values.len(), <[usize]>::len) - self.position
     }
 
     /// Whether the selection has no remaining factors.
     pub fn is_empty(&self) -> bool {
-        todo!("API only: empty selection")
+        self.len() == 0
     }
 
     /// Borrow remaining payloads when contiguous, for bulk evaluation kernels.
     ///
-    /// Returns `None` for a noncontiguous selection. Use iteration to obtain the
-    /// corresponding identities when emitting results.
+    /// Returns `None` for a noncontiguous selection. The slice and subsequent
+    /// iteration have exactly the same order. Checking an indexed selection
+    /// examines only its remaining indices, never the full payload pool.
     pub fn as_slice(&self) -> Option<&'a [F]> {
-        todo!("API only: contiguous selection view")
+        match self.indices {
+            None => Some(&self.values[self.position..]),
+            Some(indices) => {
+                let remaining = &indices[self.position..];
+                match remaining.first() {
+                    None => Some(&self.values[..0]),
+                    Some(&first)
+                        if remaining
+                            .windows(2)
+                            .all(|pair| pair[0].checked_add(1) == Some(pair[1])) =>
+                    {
+                        Some(&self.values[first..first + remaining.len()])
+                    }
+                    Some(_) => None,
+                }
+            }
+        }
     }
 }
 
@@ -102,9 +150,29 @@ impl<'a, F> Iterator for FactorSelection<'a, F> {
     type Item = (FactorId, &'a F);
 
     fn next(&mut self) -> Option<Self::Item> {
-        todo!("API only: selected factor iteration")
+        if self.len() == 0 {
+            return None;
+        }
+        let index = self
+            .indices
+            .map_or(self.position, |indices| indices[self.position]);
+        self.position += 1;
+        Some((
+            FactorId(RawKey {
+                pool: self.pool,
+                local: self.keys[index],
+            }),
+            &self.values[index],
+        ))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.len(), Some(self.len()))
     }
 }
+
+impl<F> ExactSizeIterator for FactorSelection<'_, F> {}
+impl<F> FusedIterator for FactorSelection<'_, F> {}
 
 /// Route payload-typed handles to their registered ordinary or batch family.
 ///

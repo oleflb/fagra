@@ -5,10 +5,9 @@ A typed Rust factor-graph API with homogeneous storage and static dispatch.
 Define variables and constraints, declare their types, insert values, optimize,
 and read estimates through typed keys.
 
-**API scaffold:** operational methods are `todo!()` stubs. Optimization, handle
-management, and marginalization are not implemented. Graph examples type-check
-but cannot run yet.
-Empty schema construction, typed pool access, and schema visitor dispatch are implemented.
+**Status:** graph construction, stable generational handles, state access, ordinary
+and batched factor insertion, cost evaluation, removal, and visitor dispatch work.
+`optimize()` and `marginalize()` are still `todo!()` stubs and panic when called.
 
 ## Quick start: one scalar and one prior
 
@@ -122,6 +121,10 @@ fn main() -> Result<(), SolverError> {
 correct type without casts. `optimize` means optimization to convergence;
 `factor_cost` returns a numerical objective contribution, while failures use
 Rust's `Result`. A factor can be removed with `solver.remove_factor(prior)?`.
+Before optimization, this example's initial estimate is `0.0` and its prior cost
+is `4.5`; insertion, lookup, cost evaluation, and removal are runnable today.
+Handles survive storage growth and compaction. Removed handles are rejected even
+after their slots are reused, and keys from another solver are rejected.
 
 ## Shared evaluation and further reading
 
@@ -131,10 +134,17 @@ Rust's `Result`. A factor can be removed with `solver.remove_factor(prior)?`.
   computation across six-variable reprojections. Its application geometry is placeholder code.
 - [Internal design](docs/internals.md): typed pools, schema visitors, and intended solver passes.
 
-## Check the API scaffold
+## Checks and storage timings
 
 ```sh
 cargo check --all-targets
 cargo test
 cargo doc --no-deps
+```
+
+A small release-mode storage workload measures checked state lookup, packed
+factor iteration, and reserved-capacity insertion/removal:
+
+```sh
+cargo test --release --test storage storage_workload_timing -- --ignored --nocapture
 ```

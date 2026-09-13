@@ -247,7 +247,7 @@ fn batches_and_factor_storage_support_multiple_state_schemas() {
 
 #[test]
 fn batched_payload_is_inferred_from_the_model() {
-    // Type-check the complete handle path without calling its API-only methods.
+    // Type-check the complete handle path without invoking the optimization stub.
     let _workflow = |solver: &mut Solver<OtherStates, SlamFactors>,
                      model: FrameReprojections,
                      payload: Reprojection|
@@ -362,7 +362,7 @@ const C: usize = if cfg!(feature = "wrong-width") { 3 } else { 6 };
 fn check_storage<'a, S: Storage<f64, Const<2>, Const<C>>>(
     _: &'a Matrix<f64, Const<2>, Const<C>, S>,
 ) {
-    // Taking a function pointer forces monomorphization without executing stubs.
+    // Taking a function pointer forces monomorphization without needing a state key.
     let constructor: fn(StateKey<Pose>, &'a Matrix<f64, Const<2>, Const<C>, S>) -> JacobianBlock<'a> =
         JacobianBlock::new::<Pose, 2, C, S>;
     std::hint::black_box(constructor);

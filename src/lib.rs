@@ -5,17 +5,18 @@
 //! estimates through typed keys.
 //!
 //! # Status
-//! This crate currently defines the API only. Empty schema construction, typed
-//! pool access, and schema traversal work. Graph operations, checked lookup, and
-//! factor evaluation/removal are `todo!()` stubs and panic when called.
-//! Optimization, identity management, and marginalization are not implemented.
+//! Graph construction, generational handles, checked state access, factor and
+//! batch insertion, cost evaluation, removal, and schema traversal are implemented.
+//! [`Solver::optimize`] and [`Solver::marginalize`] remain `todo!()` stubs and panic
+//! when called. Numerical assembly and trial-state management are not implemented.
 //!
 //! # Quick start: one scalar and one prior
 //! [`Variable`] defines how a state changes. [`Factor`] declares its dependencies,
 //! evaluates a [`cost`](Factor::cost), and emits residuals and Jacobians. Factors
 //! read estimates through [`StateStore`]; the solver manages storage and handles.
 //!
-//! This complete model is compile-checked, but the solver workflow remains a stub.
+//! This model works for insertion and cost evaluation; the optimization call is
+//! still a stub. Its complete workflow is compile-checked below.
 #![doc = concat!("```no_run\n", include_str!("../examples/scalar_prior.rs"), "\n```")]
 //!
 //! # Shared evaluation with batches
@@ -36,6 +37,7 @@
 
 #![deny(missing_docs)]
 
+mod dense;
 mod error;
 mod factors;
 mod key;
