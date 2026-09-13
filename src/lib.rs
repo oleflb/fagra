@@ -6,18 +6,25 @@
 //!
 //! # Status
 //! Graph construction, generational handles, checked state access, factor and
-//! batch insertion, cost evaluation, removal, and schema traversal are implemented.
-//! [`Solver::optimize`] and [`Solver::marginalize`] remain `todo!()` stubs and panic
-//! when called. Numerical assembly and trial-state management are not implemented.
+//! batch insertion, cost evaluation, removal, and Gauss–Newton optimization
+//! are implemented. [`Solver::marginalize`] remains a `todo!()` stub.
 //!
 //! # Quick start: one scalar and one prior
 //! [`Variable`] defines how a state changes. [`Factor`] declares its dependencies,
 //! evaluates a [`cost`](Factor::cost), and emits residuals and Jacobians. Factors
 //! read estimates through [`StateStore`]; the solver manages storage and handles.
 //!
-//! This model works for insertion and cost evaluation; the optimization call is
-//! still a stub. Its complete workflow is compile-checked below.
-#![doc = concat!("```no_run\n", include_str!("../examples/scalar_prior.rs"), "\n```")]
+//! This complete, tested example optimizes the scalar to its prior measurement.
+#![doc = concat!("```\n", include_str!("../examples/scalar_prior.rs"), "\n```")]
+//!
+//! # Optimization
+//! [`Solver::optimize`] uses [`GaussNewton`] with [`DenseNormalCholesky`] and default
+//! stopping controls. [`Solver::optimize_with`] accepts a reusable method and
+//! [`OptimizeOptions`], returning an [`OptimizeReport`]. Full steps may increase
+//! cost; there is no damping or line search. A required Cholesky solve needs a
+//! positive-definite normal matrix, so gauge freedoms need explicit constraints.
+//! Select [`Lsmr`] with `GaussNewton::new(Lsmr::default())` for an iterative solve
+//! using cached local Jacobians without assembling a global matrix.
 //!
 //! # Shared evaluation with batches
 //! Use [`FactorBatch`] when many factors share computation. Register its model
@@ -42,6 +49,9 @@ mod error;
 mod factors;
 mod key;
 mod linearization;
+mod lsmr;
+mod normal;
+mod optimization;
 mod solver;
 mod states;
 mod storage;
@@ -51,18 +61,22 @@ pub use error::{EvaluationError, KeyError, SolverError};
 pub use factors::{Factor, FactorBatch, FactorSelection};
 pub use key::{BatchKey, BlockId, FactorId, FactorKey, StateKey};
 pub use linearization::{JacobianBlock, LinearizationSink};
+pub use lsmr::Lsmr;
+pub use normal::DenseNormalCholesky;
+pub use optimization::{GaussNewton, OptimizeOptions, OptimizeReport, TerminationReason};
 pub use solver::Solver;
 pub use states::StateStore;
 pub use variable::Variable;
 
-/// Internal support for exported schema macros.
+/// Internal support for generated schemas and optimizer/backend dispatch.
 ///
-/// These items must be public for expansion in downstream crates. They are not
+/// These items are public for downstream macro expansion and generic bounds. They are not
 /// intended for application use; `doc(hidden)` hides documentation, not access.
 /// Changes to this plumbing can affect downstream macro expansions and manual impls.
 #[doc(hidden)]
 pub mod __private {
     pub use crate::factors::{FactorSchema, FactorStore, FactorVisitor};
+    pub use crate::optimization::{LeastSquaresBackend, Optimizer};
     pub use crate::states::{StateSchema, StateVisitor};
     pub use crate::storage::{BatchPool, FactorPool, PoolAccess, StatePool};
 }

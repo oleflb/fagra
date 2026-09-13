@@ -141,29 +141,80 @@ zero-copy view conversion does not eliminate that workspace.
 
 Cargo also declares nalgebra 0.34 solely to enable `std`, which faer-ext does not
 forward. Cargo unifies this with faer-ext's dependency; all Rust imports still
-go through the re-export. The solver's numerical operations remain API stubs.
+go through the re-export. The checked sink rejects strides that cannot fit faer's
+signed representation before invoking the conversion.
 
-## Intended solver passes
+## Optimizer and backend separation
 
-`Solver::optimize` will use ordinary library visitor implementations:
+`src/optimization.rs` contains the shared interfaces, layout, checked sink, and
+state/cost visitors. Nonlinear methods live in child modules such as
+`src/optimization/gauss_newton.rs`, which owns GN's workspace and iteration policy.
+The dense Cholesky backend lives separately in `src/normal.rs`.
+
+`Solver<S, F>` owns the graph and a retained default `GaussNewton` instance.
+`optimize_with` accepts a caller-owned method and stopping controls. The hidden
+`Optimizer<S, F>` interface separates nonlinear orchestration from graph ownership.
+`LeastSquaresBackend` consumes validated residual/Jacobian emissions and resolved
+column offsets, supplies a gradient norm, and returns a borrowed solution slice.
+Its representation is unconstrained: QR can retain rows, while CG can use a matrix
+or block operator. LM will need regularization and model-prediction extensions;
+those methods and alternate algorithms are not implemented yet.
+
+The first backend, `DenseNormalCholesky`, streams small dense block products into
+one preallocated normal matrix's lower triangle and accumulates `b = -Jᵀr`.
+Faer factorizes that matrix in place and overwrites `b` with delta. There is no
+global Jacobian, mirrored upper triangle, fagra-owned block-product temporary,
+matrix inverse, or separate copied step vector. Faer scratch and matrix/vector
+capacities are retained; kernels may pack data internally.
+The implementation uses sequential kernels and disables dynamic pivot regularization.
+The dense allocation costs approximately `8 * n²` bytes; only the lower triangle
+is cleared, accumulated, and read. Normal equations square J's condition number.
+
+## Solver passes
+
+Each optimization call rebuilds ordering and dependency metadata using retained
+vectors and maps. This handles graph edits and reusing one method across unrelated
+graphs without stale caches. State schema declaration order and each pool's dense
+order determine scalar offsets; all stored states contribute their `DOF` coordinates.
+No-variable problems return their evaluated cost without a linear solve.
+
+GN then uses ordinary library visitor implementations:
 
 1. **Linearize:** visit factor families, establish ordinary-factor scopes, and
    invoke `Factor::linearize` or `FactorBatch::linearize` with batch selections.
-2. **Solve:** use the numerical backend to compute delta; no schema visitor is needed.
-3. **Stage:** visit state pools, map each `BlockId` to its delta range, convert
+2. **Solve:** check gradient convergence, then use faer Cholesky to compute delta;
+   stop before applying an already-small step. No schema visitor is needed for the solve.
+3. **Stage:** visit state pools, take each pool's prepared delta range, convert
    tangents, and retract into trial storage without destroying accepted values.
 4. **Evaluate:** visit factor families to sum trial costs through `Factor::cost`
    and `FactorBatch::cost`. `StateStore::get` exposes trial values during this pass.
-5. **Accept or reject:** visit all state pools to commit or discard trial values.
+5. **Accept or reject:** commit each finite full step, including uphill steps;
+   discard trials if staging or evaluation fails. There is no damping or line search.
+
+The shared sink enforces factor scope ownership/completeness, dependency membership,
+matrix dimensions, finite coefficients, and representable strides. Duplicate
+variable blocks in a single emission are rejected. Ordered scopes and blocks
+take a comparison-based fast path; reordered emissions use the prepared maps.
+Per-emission markers reject duplicate variables without allocating a set. Metadata
+buffers are sized during preparation, never grown by valid residual emissions.
+
+Each state pool retains a second value buffer, reserved to at least the accepted
+buffer's capacity. Retraction writes new trial values without `T: Clone`.
+Acceptance swaps the value buffers while leaving identity metadata untouched,
+then drops old estimates. A guard discards all partial trials on evaluation errors
+or retraction/evaluator unwinding. The cost visitor always sees the trial estimates
+during evaluation and the accepted estimates after cleanup.
 
 Staging or trial evaluation failure must trigger rejection across **all** pools
 before returning an error, including when staging stopped partway through.
 Previously accepted iterations remain accepted. The optimizer owns convergence,
 damping, and acceptance rules; visitors only implement the passes.
 
-The intended hot path reuses workspace after structure preparation. Graph edits
-may allocate; user evaluators must also avoid allocations. Marginalization's
-manifold-coordinate contract and heterogeneous bulk API are still open.
+The hot path reuses workspace after preparation. Tests count allocations for a
+warmed optimization that performs actual steps, including a release workload with
+1,000 DOFs. User evaluators, retractions, and destructors must also avoid allocation
+to satisfy the end-to-end contract. Structural growth may allocate. Controls are
+documented on `OptimizeOptions`; failures preserve previously accepted iterations.
 
-Storage and identity management are implemented. Numerical assembly, trial-state
-storage, optimization, and marginalization are the remaining solver work.
+Marginalization's manifold-coordinate contract and heterogeneous bulk API remain
+open; `marginalize()` is still a stub. There is no incremental relinearization cache.

@@ -9,3 +9,6 @@ faer-ext = { version = "0.8", features = ["nalgebra"] }
 # Enable std on faer-ext's nalgebra version; Rust imports use its re-export.
 nalgebra = { version = "0.34", default-features = false, features = ["std"] }
 thiserror = "2.0.20"
+
+[dev-dependencies]
+ui_test = "0.30"

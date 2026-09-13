@@ -1,7 +1,8 @@
 use crate::{
-    BatchKey, BlockId, Factor, FactorBatch, FactorKey, KeyError, SolverError, StateKey, StateStore,
-    Variable,
+    BatchKey, BlockId, Factor, FactorBatch, FactorKey, GaussNewton, KeyError, OptimizeOptions,
+    OptimizeReport, SolverError, StateKey, StateStore, Variable,
     factors::{FactorSchema, FactorStore},
+    optimization::Optimizer,
     states::{StateSchema, StateVisitor},
     storage::{BatchPool, FactorPool, PoolAccess, StatePool},
 };
@@ -10,10 +11,12 @@ use crate::{
 ///
 /// Created from [`states!`](crate::states!) and [`factors!`](crate::factors!)
 /// declarations. Storage, checked graph insertion, factor costs, and removal work.
-/// Optimization and marginalization remain API stubs; see the [crate status](crate#status).
+/// Dense full-step Gauss–Newton is available through [`optimize`](Self::optimize).
+/// Marginalization remains an API stub; see the [crate status](crate#status).
 pub struct Solver<S, F> {
     states: S,
     factors: F,
+    optimizer: GaussNewton,
 }
 
 impl<S, F> Solver<S, F>
@@ -26,6 +29,7 @@ where
         Self {
             states: S::default(),
             factors: F::default(),
+            optimizer: GaussNewton::default(),
         }
     }
 
@@ -110,16 +114,47 @@ where
         Ok(self.factors.remove_factor(factor)?)
     }
 
-    /// Optimize the current graph to convergence, grouping selected factors by batch.
+    /// Optimize with full-step Gauss–Newton and dense normal-equation Cholesky.
     ///
-    /// Rejected trial steps must preserve accepted estimates. Evaluation,
-    /// linear-solve, and convergence failures are reported as errors.
-    /// The intended implementation uses factor visitors for linearization and
-    /// trial cost, and state visitors for staging, acceptance, and rejection.
-    /// Failed staging or trial evaluation must discard all trial values before
-    /// returning an error, retaining estimates accepted by earlier iterations.
-    pub fn optimize(&mut self) -> Result<(), SolverError> {
-        todo!("API only: nonlinear optimization")
+    /// Uses [`OptimizeOptions::default`] and retains workspace across calls.
+    /// All stored variables contribute coordinates, so unconstrained variables
+    /// can make a required linear solve singular. Finite full steps are accepted
+    /// even if cost increases; there is no damping or line search.
+    ///
+    /// Failed trial evaluation discards all trial values, retaining estimates
+    /// accepted by earlier iterations. Iteration exhaustion returns `NoConvergence`.
+    pub fn optimize(&mut self) -> Result<OptimizeReport, SolverError> {
+        self.optimizer.optimize(
+            &mut self.states,
+            &mut self.factors,
+            &OptimizeOptions::default(),
+        )
+    }
+
+    /// Optimize with a reusable method and explicit stopping controls.
+    ///
+    /// The method owns its backend/workspace and can be reused after graph edits
+    /// or on another graph. Invalid options are rejected before graph evaluation.
+    ///
+    /// ```no_run
+    /// # use fagra::{Solver, GaussNewton, OptimizeOptions, SolverError};
+    /// # fagra::states! { States {} }
+    /// # fagra::factors! { Factors {} }
+    /// # fn main() -> Result<(), SolverError> {
+    /// let mut graph = Solver::<States, Factors>::new();
+    /// let mut method = GaussNewton::default();
+    /// let options = OptimizeOptions { max_iterations: 100, ..Default::default() };
+    /// let report = graph.optimize_with(&mut method, &options)?;
+    /// # let _ = report;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn optimize_with<O: Optimizer<S, F>>(
+        &mut self,
+        method: &mut O,
+        options: &OptimizeOptions,
+    ) -> Result<OptimizeReport, SolverError> {
+        method.optimize(&mut self.states, &mut self.factors, options)
     }
 
     /// Eliminate one variable and replace its incident factors with an internal prior.

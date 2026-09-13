@@ -50,8 +50,8 @@ Removing one observation preserves sibling factor handles. Empty batches keep
 their models and remain reusable through the same `BatchKey` until the solver
 is dropped. Batch keys and all shared/local dependencies are validated before
 payload insertion; rejected payloads are dropped without publishing an entry.
-The `optimize` call remains a stub, and the SLAM example's geometry is placeholder
-code. Storage and cost dispatch themselves are implemented.
+Dense GN optimization supports both ordinary factors and batches. The SLAM
+example's application geometry and marginalization are still placeholder code.
 
 Selections preserve payload/identity order even after compaction. `len()` counts
 remaining entries, and `as_slice()` exposes those same remaining entries only
@@ -87,6 +87,13 @@ Place all residual blocks for a factor inside the same scope. Do not call
 `sink.factor` from an ordinary factor (that would nest scopes), or emit unscoped
 residuals from a batch (that would omit the factor identity). Propagate evaluation
 errors rather than silently skipping measurements.
+
+The optimizer checks that every selected factor opens exactly one scope and that
+its emissions reference only declared variables. It rejects missing, repeated,
+nested, or foreign scopes, even if an evaluator suppresses a returned emission
+error. The first backend rejects duplicate variable blocks within one residual
+emission; combine such Jacobians in the evaluator. The same variable may appear
+in multiple residual emissions within its factor scope.
 
 The `LinearizationSink` rustdoc contains compile-checked versions of both emission
 patterns. The SLAM example shows the full batch computation and identity flow.

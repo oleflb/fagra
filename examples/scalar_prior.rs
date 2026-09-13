@@ -1,7 +1,6 @@
 //! One scalar variable constrained by an ordinary prior factor.
 //!
-//! Compile with `cargo check --example scalar_prior`. The model is complete,
-//! and storage/cost operations work. The optimization call is still an API stub.
+//! Run with `cargo run --example scalar_prior` to optimize the estimate to 3.
 
 use faer_ext::nalgebra::{SMatrix, SVector};
 use fagra::{
@@ -66,9 +65,12 @@ fn main() -> Result<(), SolverError> {
         measurement: 3.0,
     })?;
 
-    solver.optimize()?;
+    let report = solver.optimize()?;
     let estimate = solver.get(x)?;
     let cost = solver.factor_cost(prior)?;
-    println!("estimate = {}, cost = {cost}", estimate.0);
+    println!(
+        "estimate = {}, cost = {cost}, steps = {}",
+        estimate.0, report.iterations
+    );
     Ok(())
 }

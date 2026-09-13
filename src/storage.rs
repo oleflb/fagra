@@ -23,12 +23,16 @@ pub trait PoolAccess<P> {
 /// an empty pool with a fresh identity, without requiring `T: Default`.
 pub struct StatePool<T: Variable> {
     entries: DensePool<T>,
+    trial: Vec<T>,
+    trial_active: bool,
 }
 
 impl<T: Variable> Default for StatePool<T> {
     fn default() -> Self {
         Self {
             entries: DensePool::default(),
+            trial: Vec::new(),
+            trial_active: false,
         }
     }
 }
@@ -38,7 +42,8 @@ impl<T: Variable> StatePool<T> {
     ///
     /// Removed, unknown, and foreign keys are rejected in constant time.
     pub fn get(&self, key: StateKey<T>) -> Result<&T, KeyError> {
-        self.entries.get(key.raw)
+        let index = self.entries.index(key.raw)?;
+        Ok(&self.current_values()[index])
     }
 
     /// Reserve room for additional states and their identity metadata.
@@ -65,12 +70,69 @@ impl<T: Variable> StatePool<T> {
     /// Order may change on removal. Estimate updates must preserve these identities.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (BlockId, &T)> {
         self.entries
+            .keys
             .iter()
-            .map(|(key, value)| (BlockId(key), value))
+            .copied()
+            .zip(self.current_values())
+            .map(|(local, value)| {
+                (
+                    BlockId(RawKey {
+                        pool: self.entries.id,
+                        local,
+                    }),
+                    value,
+                )
+            })
     }
 
     pub(crate) fn validate(&self, id: BlockId) -> Option<Result<(), KeyError>> {
         (id.0.pool == self.entries.id).then(|| self.entries.index(id.0).map(|_| ()))
+    }
+
+    fn current_values(&self) -> &[T] {
+        if self.trial_active {
+            &self.trial
+        } else {
+            &self.entries.values
+        }
+    }
+
+    pub(crate) fn prepare_trial(&mut self) {
+        self.reject_trial();
+        // Preserve user-reserved capacity when acceptance swaps the two buffers.
+        self.trial.reserve(self.entries.values.capacity());
+    }
+
+    pub(crate) fn stage(&mut self, delta: &[f64]) -> Result<(), EvaluationError> {
+        let expected = self
+            .entries
+            .values
+            .len()
+            .checked_mul(T::DOF)
+            .ok_or(EvaluationError::DimensionMismatch)?;
+        if delta.len() != expected {
+            return Err(EvaluationError::DimensionMismatch);
+        }
+        self.reject_trial();
+        for (index, value) in self.entries.values.iter().enumerate() {
+            let start = index * T::DOF;
+            let tangent = T::tangent_from_slice(&delta[start..start + T::DOF]);
+            self.trial.push(value.retract(&tangent));
+        }
+        self.trial_active = true;
+        Ok(())
+    }
+
+    pub(crate) fn accept_trial(&mut self) {
+        if self.trial_active {
+            std::mem::swap(&mut self.entries.values, &mut self.trial);
+            self.trial_active = false;
+        }
+    }
+
+    pub(crate) fn reject_trial(&mut self) {
+        self.trial_active = false;
+        self.trial.clear();
     }
 }
 
@@ -277,7 +339,7 @@ impl<B, P> BatchPool<B, P> {
     }
 }
 
-fn checked_cost(result: Result<f64, EvaluationError>) -> Result<f64, SolverError> {
+pub(crate) fn checked_cost(result: Result<f64, EvaluationError>) -> Result<f64, SolverError> {
     let cost = result?;
     if !cost.is_finite() || cost < 0.0 {
         return Err(EvaluationError::InvalidEvaluation.into());

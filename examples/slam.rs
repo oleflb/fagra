@@ -1,7 +1,7 @@
 //! Advanced API walkthrough: standalone priors and independently removable reprojections.
 //! Start with `examples/scalar_prior.rs` for an ordinary one-variable factor.
 //!
-//! Compile with `cargo check --example slam`. Optimization, marginalization, and
+//! Compile with `cargo check --example slam`. Marginalization and
 //! application geometry below are placeholders, so this example is not runnable yet.
 
 use faer_ext::nalgebra::{SMatrix, SVector, UnitQuaternion, Vector2, Vector3};

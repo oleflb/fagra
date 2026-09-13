@@ -37,6 +37,9 @@ pub enum EvaluationError {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum SolverError {
+    /// Iteration limits or convergence tolerances are invalid.
+    #[error("optimization requires a positive iteration limit and finite, nonnegative tolerances")]
+    InvalidOptions,
     /// A supplied handle could not be resolved.
     #[error(transparent)]
     Key(#[from] KeyError),
