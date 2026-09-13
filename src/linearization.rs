@@ -1,27 +1,45 @@
-use nalgebra::{DMatrixView, SMatrix, SVector};
+use faer_ext::nalgebra::{Const, DMatrixView, Dyn, Matrix, SVector, Storage};
 
 use crate::{BlockId, EvaluationError, FactorId, StateKey, Variable};
 
 /// A borrowed Jacobian matrix and the variable it differentiates.
 ///
 /// Descriptors can form a stack array; the matrices remain in their original storage.
+/// Construction borrows the coefficients without allocating or copying. Arbitrary
+/// row and column strides are preserved, including those of noncontiguous views.
 pub struct JacobianBlock<'a> {
     variable: BlockId,
-    jacobian: DMatrixView<'a, f64>,
+    jacobian: DMatrixView<'a, f64, Dyn, Dyn>,
 }
 
 impl<'a> JacobianBlock<'a> {
-    /// Borrow a fixed-size Jacobian without copying its coefficients.
+    /// Borrow a fixed-dimension Jacobian from any compatible nalgebra storage.
     ///
-    /// The state type determines the required column count. A mismatch with
+    /// Accepts owned matrices and immutable or mutably backed views borrowed
+    /// immutably. The matrix or view passed here must outlive the descriptor.
+    /// Dimensions stay known at compile time; a column-count mismatch with
     /// [`Variable::DOF`] fails during monomorphization, not necessarily `cargo check`.
+    /// The sink checks that the row count matches the emitted residual.
     /// The constructor obtains the numerical identity from [`StateKey::block_id`].
+    ///
+    /// A preallocated dynamic matrix can supply a fixed-size, strided view:
+    ///
+    /// ```no_run
+    /// # use fagra::{JacobianBlock, StateKey, Variable};
+    /// # use faer_ext::nalgebra::DMatrix;
+    /// # fn from_workspace<T: Variable>(key: StateKey<T>, workspace: &DMatrix<f64>) {
+    /// // Requires T::DOF == 6 and a workspace large enough for the selected view.
+    /// let view = workspace.fixed_view::<2, 6>(0, 0);
+    /// let block = JacobianBlock::new(key, &view);
+    /// # let _ = block;
+    /// # }
+    /// ```
     ///
     /// Factor and batch handles cannot be used as state handles:
     ///
     /// ```compile_fail
     /// use fagra::{FactorKey, JacobianBlock, Variable};
-    /// use nalgebra::SMatrix;
+    /// use faer_ext::nalgebra::SMatrix;
     /// fn wrong_kind<T: Variable>(key: FactorKey<T>, jacobian: &SMatrix<f64, 2, 3>) {
     ///     JacobianBlock::new(key, jacobian);
     /// }
@@ -29,22 +47,27 @@ impl<'a> JacobianBlock<'a> {
     ///
     /// ```compile_fail
     /// use fagra::{BatchKey, JacobianBlock, Variable};
-    /// use nalgebra::SMatrix;
+    /// use faer_ext::nalgebra::SMatrix;
     /// fn wrong_kind<T: Variable>(key: BatchKey<T>, jacobian: &SMatrix<f64, 2, 3>) {
     ///     JacobianBlock::new(key, jacobian);
     /// }
     /// ```
-    pub fn new<T: Variable, const R: usize, const C: usize>(
+    pub fn new<T, const R: usize, const C: usize, S>(
         state: StateKey<T>,
-        jacobian: &'a SMatrix<f64, R, C>,
-    ) -> Self {
+        jacobian: &'a Matrix<f64, Const<R>, Const<C>, S>,
+    ) -> Self
+    where
+        T: Variable,
+        S: Storage<f64, Const<R>, Const<C>>,
+    {
         const {
             assert!(C == T::DOF, "Jacobian columns must match state DOF");
         }
 
         Self {
             variable: state.block_id(),
-            jacobian: jacobian.as_view(),
+            // Zero skipped rows/columns preserves strides while erasing their types.
+            jacobian: jacobian.view_with_steps((0, 0), (R, C), (0, 0)),
         }
     }
 
@@ -53,8 +76,23 @@ impl<'a> JacobianBlock<'a> {
         self.variable
     }
 
-    /// Borrow the coefficients with their original lifetime and checked column count.
-    pub fn jacobian(&self) -> DMatrixView<'a, f64> {
+    /// Borrow the coefficients with their original lifetime and strides.
+    ///
+    /// The dynamic dimensions and strides are metadata, not owned storage.
+    /// Returning this view does not allocate or copy coefficients.
+    /// Convert it to a faer view with [`IntoFaer`](faer_ext::IntoFaer), preserving
+    /// its borrow lifetime, shape, and strides:
+    ///
+    /// ```no_run
+    /// use faer_ext::IntoFaer;
+    /// # fn consume(block: &fagra::JacobianBlock<'_>) {
+    /// let matrix: faer::MatRef<'_, f64> = block.jacobian().into_faer();
+    /// # let _ = matrix;
+    /// # }
+    /// ```
+    ///
+    /// `into_faer` panics if a stride cannot be represented as an `isize`.
+    pub fn jacobian(&self) -> DMatrixView<'a, f64, Dyn, Dyn> {
         self.jacobian
     }
 }
@@ -63,6 +101,38 @@ impl<'a> JacobianBlock<'a> {
 ///
 /// Implementations may assemble normal equations or retain square-root factors.
 /// Normal equations use `g = Jᵀr`, `H = JᵀJ`, and solve `H delta = -g`.
+///
+/// # Factor scopes
+/// Ordinary [`Factor`](crate::Factor) implementations receive an already-scoped
+/// sink and emit directly:
+///
+/// ```no_run
+/// # use fagra::{EvaluationError, JacobianBlock, LinearizationSink};
+/// # use faer_ext::nalgebra::SVector;
+/// # fn ordinary<L: LinearizationSink>(sink: &mut L, residual: &SVector<f64, 1>,
+/// #     jacobians: &[JacobianBlock<'_>]) -> Result<(), EvaluationError> {
+/// sink.residual(residual, jacobians)?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// A [`FactorBatch`](crate::FactorBatch) implementation instead opens one scope
+/// for each identity yielded by [`FactorSelection`](crate::FactorSelection):
+///
+/// ```no_run
+/// # use fagra::{EvaluationError, FactorId, JacobianBlock, LinearizationSink};
+/// # use faer_ext::nalgebra::SVector;
+/// # fn batched<L: LinearizationSink>(sink: &mut L, id: FactorId,
+/// #     residual: &SVector<f64, 1>, jacobians: &[JacobianBlock<'_>])
+/// #     -> Result<(), EvaluationError> {
+/// sink.factor(id, |out| out.residual(residual, jacobians))?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// All residual blocks belonging to one factor go inside its single scope.
+/// Opening another scope in an ordinary factor would nest scopes; emitting
+/// directly from a batch would omit the factor identity. Both are invalid.
 pub trait LinearizationSink: Sized {
     /// Emit one factor's complete linearization within an identity scope.
     ///

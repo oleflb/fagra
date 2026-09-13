@@ -1,8 +1,9 @@
 use crate::{
     BatchKey, Factor, FactorBatch, FactorKey, KeyError, SolverError, StateKey, StateStore,
     Variable,
-    factors::{BatchStore, FactorSchema, FactorStore, StandaloneFactorStore},
+    factors::{FactorSchema, FactorStore},
     states::StateSchema,
+    storage::{BatchPool, FactorPool, PoolAccess, StatePool},
 };
 
 /// A graph over a declared state schema `S` and factor schema `F`.
@@ -28,7 +29,7 @@ where
     /// Insert an application-initialized variable into its registered pool.
     pub fn add<T: Variable>(&mut self, _value: T) -> StateKey<T>
     where
-        S: StateStore<T>,
+        S: PoolAccess<StatePool<T>>,
     {
         todo!("API only: variable insertion")
     }
@@ -45,7 +46,7 @@ where
     pub fn add_factor<T>(&mut self, _factor: T) -> Result<FactorKey<T>, SolverError>
     where
         T: Factor<S>,
-        F: StandaloneFactorStore<T>,
+        F: PoolAccess<FactorPool<T>>,
     {
         todo!("API only: ordinary factor insertion")
     }
@@ -56,7 +57,7 @@ where
     pub fn add_batch<B>(&mut self, _model: B) -> BatchKey<B>
     where
         B: FactorBatch<S>,
-        F: BatchStore<B, B::Factor>,
+        F: PoolAccess<BatchPool<B, B::Factor>>,
     {
         todo!("API only: batch insertion")
     }
@@ -69,15 +70,15 @@ where
     ) -> Result<FactorKey<B::Factor>, SolverError>
     where
         B: FactorBatch<S>,
-        F: BatchStore<B, B::Factor>,
+        F: PoolAccess<BatchPool<B, B::Factor>>,
     {
         todo!("API only: batched factor insertion")
     }
 
     /// Evaluate one ordinary or batched factor's nonlinear cost without Jacobians.
-    pub fn factor_error<T>(&self, _factor: FactorKey<T>) -> Result<f64, SolverError>
+    pub fn factor_cost<T>(&self, _factor: FactorKey<T>) -> Result<f64, SolverError>
     where
-        F: FactorStore<T>,
+        F: FactorStore<S, T>,
     {
         todo!("API only: selected factor cost")
     }
@@ -85,16 +86,20 @@ where
     /// Discard one factor and its cached contribution, preserving sibling handles.
     pub fn remove_factor<T>(&mut self, _factor: FactorKey<T>) -> Result<(), SolverError>
     where
-        F: FactorStore<T>,
+        F: FactorStore<S, T>,
     {
         todo!("API only: factor removal")
     }
 
-    /// Optimize the current graph, grouping selected factors by batch.
+    /// Optimize the current graph to convergence, grouping selected factors by batch.
     ///
     /// Rejected trial steps must preserve accepted estimates. Evaluation,
     /// linear-solve, and convergence failures are reported as errors.
-    pub fn update(&mut self) -> Result<(), SolverError> {
+    /// The intended implementation uses factor visitors for linearization and
+    /// trial cost, and state visitors for staging, acceptance, and rejection.
+    /// Failed staging or trial evaluation must discard all trial values before
+    /// returning an error, retaining estimates accepted by earlier iterations.
+    pub fn optimize(&mut self) -> Result<(), SolverError> {
         todo!("API only: nonlinear optimization")
     }
 
@@ -105,7 +110,7 @@ where
     /// Manifold prior coordinates and heterogeneous bulk selection remain undesigned.
     pub fn marginalize<T: Variable>(&mut self, _variable: StateKey<T>) -> Result<(), SolverError>
     where
-        S: StateStore<T>,
+        S: PoolAccess<StatePool<T>>,
     {
         todo!("API only: variable marginalization")
     }

@@ -2,68 +2,136 @@
 
 A typed Rust factor-graph API with homogeneous storage and static dispatch.
 
+Define variables and constraints, declare their types, insert values, optimize,
+and read estimates through typed keys.
+
 **API scaffold:** operational methods are `todo!()` stubs. Optimization, handle
-management, and marginalization are not implemented. Examples currently type-check only.
+management, and marginalization are not implemented. Graph examples type-check
+but cannot run yet.
+Empty schema construction, typed pool access, and schema visitor dispatch are implemented.
 
-## Declare storage
+## Quick start: one scalar and one prior
 
-```rust
-use fagra::{Batch, Solver};
+This model minimizes `0.5 * (x - measurement)²`. Its solution is `x = measurement`.
+The complete, compile-checked source is [examples/scalar_prior.rs](examples/scalar_prior.rs).
 
-fagra::states! {
-    pub SlamStates {
-        poses: Pose,
-        cameras: CameraIntrinsics,
-        landmarks: Landmark,
-    }
-}
+### 1. Define the variable
 
-fagra::factors! {
-    pub SlamFactors {
-        priors: PosePrior,
-        reprojections: Batch<FrameReprojections, Reprojection>,
-    }
-}
-
-type SlamSolver = Solver<SlamStates, SlamFactors>;
-```
-
-- `Variable` defines tangent conversion and retraction.
-- `StateKey<T>` identifies a state; `FactorKey<T>` and `BatchKey<T>` identify graph contributions and evaluators.
-- `Factor<S>` evaluates an ordinary constraint.
-- `FactorBatch<S>` shares work across independently identified factor payloads.
-- `Batch<B, F>` stores model `B` and contiguous payloads `F`; no second batch trait is needed.
-- `LinearizationSink` receives factor-tagged residuals and borrowed Jacobian blocks.
-
-`JacobianBlock::new(state_key, &jacobian)` derives the numerical identity from
-the typed state key and checks the column count against `T::DOF` during code generation.
-
-Each payload type selects one registered family. Each batch instance owns its
-own factor buffer. The solver controls storage mutation and stable handles.
-
-## Use the graph
+`Variable` describes the optimization coordinates and how to apply an increment.
+A scalar has one coordinate and uses addition for retraction.
 
 ```rust
-let mut solver = SlamSolver::new();
-let camera = solver.add(initial_intrinsics);
-let landmark = solver.add(initial_landmark);
+use fagra::{
+    BlockId, EvaluationError, Factor, JacobianBlock, LinearizationSink,
+    Solver, SolverError, StateKey, StateStore, Variable,
+};
+use faer_ext::nalgebra::{SMatrix, SVector};
 
-let frame = solver.add_batch(FrameReprojections { trajectory, camera });
-let observation = solver.add_factor_to(frame, Reprojection { landmark, pixel })?;
+struct Scalar(f64);
 
-solver.update()?;
-let estimate = solver.get(landmark)?;
-let cost = solver.factor_error(observation)?;
-solver.remove_factor(observation)?;
+impl Variable for Scalar {
+    type Tangent = f64;
+    const DOF: usize = 1;
+
+    fn tangent_from_slice(delta: &[f64]) -> f64 {
+        delta[0] // The solver guarantees exactly DOF coordinates.
+    }
+
+    fn retract(&self, delta: &f64) -> Self {
+        Self(self.0 + *delta)
+    }
+}
 ```
 
-See [examples/slam.rs](examples/slam.rs) for the compile-checked declarations,
-storage-generic implementations, six-variable reprojection emissions, and marginalization API.
-Application geometry is deliberately left as placeholders.
+### 2. Define the constraint
 
-The intended hot path reuses workspace after structure preparation. Graph edits
-may allocate; user evaluators must also avoid allocations. Marginalization's
-manifold-coordinate contract and heterogeneous bulk API are still open.
+An ordinary `Factor` declares dependencies, evaluates its cost without Jacobians,
+and emits a linearization. It reads estimates through `StateStore<T>`.
+
+```rust
+struct Prior {
+    variable: StateKey<Scalar>,
+    measurement: f64,
+}
+
+impl<S: StateStore<Scalar>> Factor<S> for Prior {
+    fn visit_variables(&self, mut visitor: impl FnMut(BlockId)) {
+        visitor(self.variable.block_id());
+    }
+
+    fn cost(&self, states: &S) -> Result<f64, EvaluationError> {
+        let residual = states.get(self.variable)?.0 - self.measurement;
+        let cost = 0.5 * residual * residual;
+        if !cost.is_finite() {
+            return Err(EvaluationError::InvalidEvaluation);
+        }
+        Ok(cost)
+    }
+
+    fn linearize<L: LinearizationSink>(
+        &self,
+        states: &S,
+        sink: &mut L,
+    ) -> Result<(), EvaluationError> {
+        let residual = SVector::<f64, 1>::new(states.get(self.variable)?.0 - self.measurement);
+        let jacobian = SMatrix::<f64, 1, 1>::new(1.0);
+        sink.residual(&residual, &[JacobianBlock::new(self.variable, &jacobian)])
+    }
+}
+```
+
+The residual is `x - measurement`; its derivative under additive retraction is
+`1`. The sink rejects invalid dimensions and nonfinite coefficients.
+`JacobianBlock::new` checks the column count against the state's `DOF` during
+code generation. It accepts owned matrices and fixed-size views into existing
+storage, preserving row and column strides without allocation or coefficient
+copies. Ordinary factors emit directly: the solver has already opened their
+factor scope.
+
+Use nalgebra through `faer_ext::nalgebra` to match the interoperability crate's
+version. The solver backend can borrow these coefficients as faer matrices with
+`block.jacobian().into_faer()`; see [backend interoperability](docs/internals.md#backend-interoperability).
+
+### 3. Declare the graph's types
+
+The macros register types and generate their storage. Each state or factor
+payload type identifies one family; a family can hold many instances.
+
+```rust
+fagra::states! { States { scalars: Scalar } }
+fagra::factors! { Factors { priors: Prior } }
+```
+
+### 4. Insert, optimize, and read
+
+```rust
+fn main() -> Result<(), SolverError> {
+    let mut solver = Solver::<States, Factors>::new();
+    let x = solver.add(Scalar(0.0));
+    let prior = solver.add_factor(Prior { variable: x, measurement: 3.0 })?;
+
+    solver.optimize()?;
+    let estimate = solver.get(x)?;
+    let cost = solver.factor_cost(prior)?;
+    println!("estimate = {}, cost = {cost}", estimate.0);
+    Ok(())
+}
+```
+
+`x` is a `StateKey<Scalar>` and `prior` is a `FactorKey<Prior>`. Keys select the
+correct type without casts. `optimize` means optimization to convergence;
+`factor_cost` returns a numerical objective contribution, while failures use
+Rust's `Result`. A factor can be removed with `solver.remove_factor(prior)?`.
+
+## Shared evaluation and further reading
+
+- [Batching guide](docs/batching.md): shared models, individual payloads, and the
+  ordinary-versus-batched factor-scope rules.
+- [SLAM example](examples/slam.rs): manifold variables and shared trajectory
+  computation across six-variable reprojections. Its application geometry is placeholder code.
+- [Internal design](docs/internals.md): typed pools, schema visitors, and intended solver passes.
+
+## Check the API scaffold
 
 ```sh
 cargo check --all-targets

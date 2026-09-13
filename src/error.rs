@@ -46,7 +46,7 @@ pub enum SolverError {
     /// The numerical backend could not solve the linear system.
     #[error("linear system solve failed")]
     LinearSolveFailed,
-    /// The update did not meet its convergence criterion.
+    /// Optimization did not meet its convergence criterion.
     #[error("optimization did not converge")]
     NoConvergence,
 }

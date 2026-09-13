@@ -1,13 +1,14 @@
-//! API walkthrough: standalone priors and independently removable reprojections.
+//! Advanced API walkthrough: standalone priors and independently removable reprojections.
+//! Start with `examples/scalar_prior.rs` for an ordinary one-variable factor.
 //!
 //! Compile with `cargo check --example slam`. Solver operations and application
 //! geometry below are placeholders, so this example is not runnable yet.
 
+use faer_ext::nalgebra::{SMatrix, SVector, UnitQuaternion, Vector2, Vector3};
 use fagra::{
-    Batch, BlockId, EvaluationError, Factor, FactorBatch, FactorSelection, JacobianBlock,
+    BlockId, EvaluationError, Factor, FactorBatch, FactorSelection, JacobianBlock,
     LinearizationSink, Solver, SolverError, StateKey, StateStore, Variable,
 };
-use nalgebra::{SMatrix, SVector, UnitQuaternion, Vector2, Vector3};
 
 pub struct Pose {
     pub rotation: UnitQuaternion<f64>,
@@ -77,7 +78,7 @@ impl<S: StateStore<Pose>> Factor<S> for PosePrior {
         visitor(self.pose.block_id());
     }
 
-    fn error(&self, states: &S) -> Result<f64, EvaluationError> {
+    fn cost(&self, states: &S) -> Result<f64, EvaluationError> {
         let _pose = states.get(self.pose)?;
         todo!("Application geometry: prior cost without Jacobians")
     }
@@ -118,7 +119,7 @@ where
         visitor(factor.landmark.block_id());
     }
 
-    fn error(
+    fn cost(
         &self,
         states: &S,
         factors: FactorSelection<'_, Reprojection>,
@@ -271,9 +272,9 @@ fn main() -> Result<(), SolverError> {
         },
     )?;
 
-    solver.update()?;
+    solver.optimize()?;
     let _estimate: &Pose = solver.get(trajectory[2])?;
-    let _cost = solver.factor_error(observation)?;
+    let _cost = solver.factor_cost(observation)?;
     solver.remove_factor(observation)?;
     solver.marginalize(trajectory[0])?;
     Ok(())

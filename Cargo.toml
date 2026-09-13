@@ -4,5 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-nalgebra = "0.35.0"
+faer = "0.24"
+faer-ext = { version = "0.8", features = ["nalgebra"] }
+# Enable std on faer-ext's nalgebra version; Rust imports use its re-export.
+nalgebra = { version = "0.34", default-features = false, features = ["std"] }
 thiserror = "2.0.20"
