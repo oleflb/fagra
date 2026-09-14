@@ -144,6 +144,9 @@ forward. Cargo unifies this with faer-ext's dependency; all Rust imports still
 go through the re-export. The checked sink rejects strides that cannot fit faer's
 signed representation before invoking the conversion.
 
+Faer enables only `std` and `linalg`; the sequential backends do not require its
+default parallel, sparse-solver, random-generation, or NumPy I/O features.
+
 ## Optimizer and backend separation
 
 `src/optimization.rs` contains the shared interfaces, layout, checked sink, and
