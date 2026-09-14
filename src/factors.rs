@@ -70,16 +70,15 @@ pub trait FactorBatch<S> {
     ) -> Result<(), EvaluationError>;
 }
 
-/// Borrowed selection of live factors from one batch.
+/// Borrowed contiguous selection of live factors from one batch.
 ///
-/// Iteration yields `(FactorId, &F)`. The solver groups requests by batch and
-/// reuses scheduling storage; selecting a few factors must not scan the full pool.
+/// Iteration yields `(FactorId, &F)`. The solver borrows a whole batch for
+/// optimization or a single payload for individual cost evaluation.
 /// Identities remain valid even when removal changes dense storage positions.
 pub struct FactorSelection<'a, F> {
     pool: PoolId,
     keys: &'a [LocalKey],
     values: &'a [F],
-    indices: Option<&'a [usize]>,
     position: usize,
 }
 
@@ -90,29 +89,13 @@ impl<'a, F> FactorSelection<'a, F> {
             pool,
             keys,
             values,
-            indices: None,
             position: 0,
         }
     }
 
-    pub(crate) fn indexed(
-        pool: PoolId,
-        keys: &'a [LocalKey],
-        values: &'a [F],
-        indices: &'a [usize],
-    ) -> Result<Self, KeyError> {
-        if indices.iter().any(|&index| index >= values.len()) {
-            return Err(KeyError::Unknown);
-        }
-        Ok(Self {
-            indices: Some(indices),
-            ..Self::contiguous(pool, keys, values)
-        })
-    }
-
     /// Number of factors remaining in this selection.
     pub fn len(&self) -> usize {
-        self.indices.map_or(self.values.len(), <[usize]>::len) - self.position
+        self.values.len() - self.position
     }
 
     /// Whether the selection has no remaining factors.
@@ -120,29 +103,11 @@ impl<'a, F> FactorSelection<'a, F> {
         self.len() == 0
     }
 
-    /// Borrow remaining payloads when contiguous, for bulk evaluation kernels.
+    /// Borrow remaining payloads for bulk evaluation kernels.
     ///
-    /// Returns `None` for a noncontiguous selection. The slice and subsequent
-    /// iteration have exactly the same order. Checking an indexed selection
-    /// examines only its remaining indices, never the full payload pool.
-    pub fn as_slice(&self) -> Option<&'a [F]> {
-        match self.indices {
-            None => Some(&self.values[self.position..]),
-            Some(indices) => {
-                let remaining = &indices[self.position..];
-                match remaining.first() {
-                    None => Some(&self.values[..0]),
-                    Some(&first)
-                        if remaining
-                            .windows(2)
-                            .all(|pair| pair[0].checked_add(1) == Some(pair[1])) =>
-                    {
-                        Some(&self.values[first..first + remaining.len()])
-                    }
-                    Some(_) => None,
-                }
-            }
-        }
+    /// The slice and subsequent iteration have exactly the same order.
+    pub fn as_slice(&self) -> &'a [F] {
+        &self.values[self.position..]
     }
 }
 
@@ -153,9 +118,7 @@ impl<'a, F> Iterator for FactorSelection<'a, F> {
         if self.len() == 0 {
             return None;
         }
-        let index = self
-            .indices
-            .map_or(self.position, |indices| indices[self.position]);
+        let index = self.position;
         self.position += 1;
         Some((
             FactorId(RawKey {

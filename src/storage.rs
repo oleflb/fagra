@@ -270,7 +270,7 @@ impl<B, P> BatchPool<B, P> {
     }
 
     /// Traverse batches in dense order, borrowing each model and all of its payloads.
-    /// Empty batches yield empty selections. No payloads or scheduling buffers are copied.
+    /// Empty batches yield empty selections. No payloads are copied.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (BatchKey<B>, &B, FactorSelection<'_, P>)> {
         self.batches.iter().map(|(key, batch)| {
             (
@@ -279,21 +279,6 @@ impl<B, P> BatchPool<B, P> {
                 FactorSelection::contiguous(self.locations.id, &batch.keys, &batch.values),
             )
         })
-    }
-
-    /// Borrow payloads at prepared dense indices, preserving the supplied order.
-    ///
-    /// Out-of-range indices return `Unknown`. Indices must be prepared again after
-    /// edits; only factor keys are stable. This checks O(selected entries) indices
-    /// and allocates nothing. Scheduling callers are responsible for selecting
-    /// each factor at most once when evaluating the graph's objective.
-    pub fn select<'a>(
-        &'a self,
-        key: BatchKey<B>,
-        indices: &'a [usize],
-    ) -> Result<FactorSelection<'a, P>, KeyError> {
-        let batch = self.batches.get(key.raw)?;
-        FactorSelection::indexed(self.locations.id, &batch.keys, &batch.values, indices)
     }
 
     /// Locate the payload's batch and evaluate just that factor through its model.

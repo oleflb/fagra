@@ -311,7 +311,7 @@ fn batch_selections_preserve_identity_order_and_remaining_slices() {
     drop(original);
     pool.remove_factor(keys[1]).unwrap();
     let (_, _, all) = pool.iter().next().unwrap();
-    assert_eq!(all.as_slice().unwrap(), [0, 5, 2, 3, 4]);
+    assert_eq!(all.as_slice(), [0, 5, 2, 3, 4]);
     assert_eq!(
         all.map(|(id, _)| id).collect::<Vec<_>>(),
         [
@@ -323,47 +323,27 @@ fn batch_selections_preserve_identity_order_and_remaining_slices() {
         ]
     );
 
-    let mut selected = pool.select(batch, &[0, 2, 3]).unwrap();
-    assert_eq!(selected.len(), 3);
-    assert_eq!(selected.size_hint(), (3, Some(3)));
-    assert!(selected.as_slice().is_none());
-    assert_eq!(selected.next(), Some((original_ids[0], &0)));
-    assert_eq!(selected.as_slice().unwrap(), [2, 3]);
-    assert_eq!(selected.next(), Some((original_ids[2], &2)));
-    assert_eq!(ExactSizeIterator::len(&selected), 1);
-    assert_eq!(selected.next(), Some((original_ids[3], &3)));
+    let mut selected = pool.iter().next().unwrap().2;
+    let expected = [0, 5, 2, 3, 4];
+    for (position, &value) in expected.iter().enumerate() {
+        let remaining = expected.len() - position;
+        assert_eq!(selected.len(), remaining);
+        assert_eq!(ExactSizeIterator::len(&selected), remaining);
+        assert_eq!(selected.size_hint(), (remaining, Some(remaining)));
+        assert_eq!(selected.as_slice(), &expected[position..]);
+        assert_eq!(selected.next(), Some((original_ids[value], &value)));
+    }
     assert!(selected.is_empty());
-    assert_eq!(selected.as_slice().unwrap(), []);
+    assert_eq!(selected.as_slice(), []);
+    assert_eq!(selected.size_hint(), (0, Some(0)));
     assert_eq!(selected.next(), None);
     assert_eq!(selected.next(), None);
 
-    let reversed = pool.select(batch, &[3, 0]).unwrap();
-    assert!(reversed.as_slice().is_none());
-    assert_eq!(
-        reversed.map(|(_, value)| *value).collect::<Vec<_>>(),
-        [3, 0]
-    );
-    assert!(matches!(pool.select(batch, &[5]), Err(KeyError::Unknown)));
-    assert!(
-        pool.select(batch, &[])
-            .unwrap()
-            .as_slice()
-            .unwrap()
-            .is_empty()
-    );
     let empty = pool.insert_batch(());
-    assert!(
-        pool.iter()
-            .find(|(key, _, _)| *key == empty)
-            .unwrap()
-            .2
-            .is_empty()
-    );
-    let foreign = BatchPool::<(), usize>::default().insert_batch(());
-    assert!(matches!(
-        pool.select(foreign, &[]),
-        Err(KeyError::ForeignSolver)
-    ));
+    let mut selected = pool.iter().find(|(key, _, _)| *key == empty).unwrap().2;
+    assert!(selected.is_empty());
+    assert!(selected.as_slice().is_empty());
+    assert_eq!(selected.next(), None);
 }
 
 #[test]

@@ -54,9 +54,9 @@ Dense GN optimization supports both ordinary factors and batches. The SLAM
 example's application geometry and marginalization are still placeholder code.
 
 Selections preserve payload/identity order even after compaction. `len()` counts
-remaining entries, and `as_slice()` exposes those same remaining entries only
-when contiguous in iteration order. Indexed selections inspect selected indices,
-not the entire batch, and iteration allocates no storage.
+remaining entries, and `as_slice()` returns those same remaining payloads as
+`&[Payload]` in iteration order. Selections are always contiguous, and iteration
+allocates no storage.
 
 ## Ordinary versus batched factor scopes
 

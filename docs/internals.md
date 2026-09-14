@@ -68,10 +68,9 @@ there is currently no public batch-removal operation.
 
 Internal pool methods provide reservation, insertion, checked access/removal,
 and live iteration. Batch pools additionally expose models and borrowed selections.
-`FactorSelection` supports contiguous ranges and prepared index lists. Indices
-are validated and their order is preserved; scheduling callers select each factor
-once. Its exact remaining length is O(1). Testing contiguity of an indexed suffix
-is O(selected entries), and never scans unrelated payloads.
+`FactorSelection` borrows contiguous slices of identities and payloads: a whole
+batch for optimization, or one payload for individual cost evaluation. Its exact
+remaining length and `as_slice()` access are O(1), with no allocation.
 
 Solver insertion validates dependencies before publishing a factor, including
 shared batch inputs. This currently uses state visitors: O(state families) per
