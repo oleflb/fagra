@@ -16,6 +16,7 @@ use fagra::{JacobianBlock, StateKey, Variable};
 
 struct Pose;
 impl Variable for Pose {
+    type Scalar = f64;
     type Tangent = [f64; 6];
     const DOF: usize = 6;
     fn tangent_from_slice(_: &[f64]) -> Self::Tangent {

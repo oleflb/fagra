@@ -10,9 +10,9 @@ This document describes the interfaces connecting generated schemas to the solve
 | `PoolAccess<P>` | Borrow one concrete pool with `pool` or `pool_mut` |
 | `FactorStore<S, P>` | Route a payload-typed factor key for cost evaluation or removal |
 | `StateSchema` | Traverse the declared state pools |
-| `StateVisitor` | Implement one bulk state operation |
+| `StateVisitor<R>` | Implement one bulk state operation at precision `R` |
 | `FactorSchema<S>` | Traverse factor families compatible with state schema `S` |
-| `FactorVisitor<S>` | Implement one bulk ordinary/batched factor operation |
+| `FactorVisitor<S, R>` | Implement one bulk ordinary/batched factor operation at precision `R` |
 
 The macros generate library-owned `StatePool<T>`, `FactorPool<T>`, and
 `BatchPool<B, P>` fields, empty initialization, typed access, and traversal.
@@ -29,6 +29,13 @@ batch is private; `Batch<Model, Payload>` in declarations is only macro syntax.
 Individual insertion and lookup use typed pool access, not traversal. Factor
 cost/removal by key use `FactorStore<S, P>` because a payload-typed key does not
 identify its batch model at the type level.
+
+`StateSchema` and `FactorSchema<S>` each declare an associated `Scalar: Real`.
+`Solver<S, F>` requires the two to agree. Visitors constrain every visited variable
+or evaluator to that scalar; factor-key routing returns it as well. Generic
+declarations (`States<R>`, `Factors<R>`) propagate the bound through generated
+storage and impls. Non-generic declarations select `f64`. Empty generic schemas
+retain their scalar type through a zero-sized marker.
 
 ## Dense generational storage
 
@@ -91,24 +98,24 @@ reserved for graph-aware operations so it cannot leave dangling dependencies.
   `std::convert::Infallible` so cleanup cannot fail.
 
 For example, this pass counts declared state families without calling operational
-stubs. It assumes `States` from the scalar-prior quick start:
+stubs. It assumes `States<R>` from [the scalar-prior example](../examples/scalar_prior.rs):
 
 ```rust
-use fagra::{Variable, __private::{StatePool, StateSchema, StateVisitor}};
+use fagra::{Real, Variable, __private::{StatePool, StateSchema, StateVisitor}};
 use std::convert::Infallible;
 
 struct CountFamilies(usize);
 
-impl StateVisitor for CountFamilies {
+impl<R: Real> StateVisitor<R> for CountFamilies {
     type Error = Infallible;
 
-    fn pool<T: Variable>(&mut self, _: &mut StatePool<T>) -> Result<(), Infallible> {
+    fn pool<T: Variable<Scalar = R>>(&mut self, _: &mut StatePool<T>) -> Result<(), Infallible> {
         self.0 += 1;
         Ok(())
     }
 }
 
-let mut states = States::default();
+let mut states = States::<f64>::default();
 let mut count = CountFamilies(0);
 states.visit(&mut count).unwrap(); // Infallible error type.
 assert_eq!(count.0, 1);
@@ -123,8 +130,8 @@ use nalgebra through `faer_ext::nalgebra`, keeping their types compatible with
 ```rust
 use faer_ext::IntoFaer;
 
-fn consume(block: &fagra::JacobianBlock<'_>) {
-    let matrix: faer::MatRef<'_, f64> = block.jacobian().into_faer();
+fn consume<R: fagra::Real>(block: &fagra::JacobianBlock<'_, R>) {
+    let matrix: faer::MatRef<'_, R> = block.jacobian().into_faer();
     // Use matrix to accumulate into solver-owned numerical workspace.
 }
 ```
@@ -153,7 +160,8 @@ state/cost visitors. Nonlinear methods live in child modules such as
 `src/optimization/gauss_newton.rs`, which owns GN's workspace and iteration policy.
 The dense Cholesky backend lives separately in `src/normal.rs`.
 
-`Solver<S, F>` owns the graph and a retained default `GaussNewton` instance.
+`Solver<S, F>` owns the graph and a retained default
+`GaussNewton<DenseNormalCholesky<S::Scalar>>` instance.
 `optimize_with` accepts a caller-owned method and stopping controls. The hidden
 `Optimizer<S, F>` interface separates nonlinear orchestration from graph ownership.
 `LeastSquaresBackend` consumes validated residual/Jacobian emissions and resolved
@@ -162,6 +170,12 @@ Its representation is unconstrained: QR can retain rows, while CG can use a matr
 or block operator. LM will need regularization and model-prediction extensions;
 those methods and alternate algorithms are not implemented yet.
 
+`LeastSquaresBackend::Scalar` determines the coefficients and step buffer, and
+`GaussNewton<B>` requires it to match the schemas. `OptimizeOptions<R>` and
+`OptimizeReport<R>` carry the same precision. Both `DenseNormalCholesky<R>` and
+`Lsmr<R>` use faer's scalar-generic kernels and scratch sizing. There are no
+precision conversions in the evaluation or optimization path.
+
 The first backend, `DenseNormalCholesky`, streams small dense block products into
 one preallocated normal matrix's lower triangle and accumulates `b = -Jᵀr`.
 Faer factorizes that matrix in place and overwrites `b` with delta. There is no
@@ -169,8 +183,9 @@ global Jacobian, mirrored upper triangle, fagra-owned block-product temporary,
 matrix inverse, or separate copied step vector. Faer scratch and matrix/vector
 capacities are retained; kernels may pack data internally.
 The implementation uses sequential kernels and disables dynamic pivot regularization.
-The dense allocation costs approximately `8 * n²` bytes; only the lower triangle
-is cleared, accumulated, and read. Normal equations square J's condition number.
+The dense allocation costs approximately `size_of::<R>() * n²` bytes; only the
+lower triangle is cleared, accumulated, and read. Normal equations square J's
+condition number.
 
 ## Solver passes
 

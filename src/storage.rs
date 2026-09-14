@@ -1,6 +1,6 @@
 use crate::{
     BatchKey, BlockId, EvaluationError, Factor, FactorBatch, FactorId, FactorKey, FactorSelection,
-    KeyError, SolverError, StateKey, Variable,
+    KeyError, Real, SolverError, StateKey, Variable,
     dense::DensePool,
     key::{LocalKey, RawKey},
 };
@@ -103,7 +103,7 @@ impl<T: Variable> StatePool<T> {
         self.trial.reserve(self.entries.values.capacity());
     }
 
-    pub(crate) fn stage(&mut self, delta: &[f64]) -> Result<(), EvaluationError> {
+    pub(crate) fn stage(&mut self, delta: &[T::Scalar]) -> Result<(), EvaluationError> {
         let expected = self
             .entries
             .values
@@ -173,7 +173,7 @@ impl<T> FactorPool<T> {
     /// Validate a handle and evaluate the ordinary factor's nonlinear cost.
     ///
     /// Nonfinite or negative objective contributions are rejected.
-    pub fn factor_cost<S>(&self, states: &S, key: FactorKey<T>) -> Result<f64, SolverError>
+    pub fn factor_cost<S>(&self, states: &S, key: FactorKey<T>) -> Result<T::Scalar, SolverError>
     where
         T: Factor<S>,
     {
@@ -285,7 +285,7 @@ impl<B, P> BatchPool<B, P> {
     ///
     /// Invalid keys must be rejected without scanning unrelated payloads.
     /// Nonfinite or negative objective contributions are rejected.
-    pub fn factor_cost<S>(&self, states: &S, key: FactorKey<P>) -> Result<f64, SolverError>
+    pub fn factor_cost<S>(&self, states: &S, key: FactorKey<P>) -> Result<B::Scalar, SolverError>
     where
         B: FactorBatch<S, Factor = P>,
     {
@@ -324,9 +324,9 @@ impl<B, P> BatchPool<B, P> {
     }
 }
 
-pub(crate) fn checked_cost(result: Result<f64, EvaluationError>) -> Result<f64, SolverError> {
+pub(crate) fn checked_cost<R: Real>(result: Result<R, EvaluationError>) -> Result<R, SolverError> {
     let cost = result?;
-    if !cost.is_finite() || cost < 0.0 {
+    if !cost.is_finite() || cost < R::zero() {
         return Err(EvaluationError::InvalidEvaluation.into());
     }
     Ok(cost)

@@ -21,6 +21,7 @@ struct Observation {
 }
 
 impl<S: StateStore<Scalar>> FactorBatch<S> for Model {
+    type Scalar = f64;
     type Factor = Observation;
 
     fn visit_variables(&self, factor: &Observation, mut visitor: impl FnMut(BlockId)) {
@@ -45,7 +46,7 @@ impl<S: StateStore<Scalar>> FactorBatch<S> for Model {
             .sum()
     }
 
-    fn linearize<L: LinearizationSink>(
+    fn linearize<L: LinearizationSink<Scalar = f64>>(
         &self,
         _: &S,
         _: FactorSelection<'_, Observation>,
@@ -57,11 +58,16 @@ impl<S: StateStore<Scalar>> FactorBatch<S> for Model {
 
 struct ReportedCost(f64);
 impl<S> Factor<S> for ReportedCost {
+    type Scalar = f64;
     fn visit_variables(&self, _: impl FnMut(BlockId)) {}
     fn cost(&self, _: &S) -> Result<f64, EvaluationError> {
         Ok(self.0)
     }
-    fn linearize<L: LinearizationSink>(&self, _: &S, _: &mut L) -> Result<(), EvaluationError> {
+    fn linearize<L: LinearizationSink<Scalar = f64>>(
+        &self,
+        _: &S,
+        _: &mut L,
+    ) -> Result<(), EvaluationError> {
         unreachable!("these tests evaluate costs only")
     }
 }
@@ -73,7 +79,7 @@ fagra::factors! {
         reported: ReportedCost,
     }
 }
-type Graph = Solver<scalar::States, Factors>;
+type Graph = Solver<scalar::States<f64>, Factors>;
 
 #[test]
 fn state_keys_survive_growth_and_jacobians_borrow_real_storage() {
@@ -393,19 +399,24 @@ fn failed_insertions_do_not_publish_payloads() {
         }
     }
     impl<S> Factor<S> for Watched {
+        type Scalar = f64;
         fn visit_variables(&self, mut visit: impl FnMut(BlockId)) {
             visit(self.variable.block_id());
         }
         fn cost(&self, _: &S) -> Result<f64, EvaluationError> {
             Ok(0.0)
         }
-        fn linearize<L: LinearizationSink>(&self, _: &S, _: &mut L) -> Result<(), EvaluationError> {
+        fn linearize<L: LinearizationSink<Scalar = f64>>(
+            &self,
+            _: &S,
+            _: &mut L,
+        ) -> Result<(), EvaluationError> {
             Ok(())
         }
     }
     fagra::factors! { WatchedFactors { watched: Watched } }
     let drops = Rc::new(Cell::new(0));
-    let mut graph = Solver::<scalar::States, WatchedFactors>::new();
+    let mut graph = Solver::<scalar::States<f64>, WatchedFactors>::new();
     let foreign = Graph::new().add(Scalar(0.0));
     assert!(
         graph

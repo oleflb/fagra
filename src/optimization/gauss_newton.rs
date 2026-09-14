@@ -7,6 +7,7 @@ use super::{
 use crate::{
     DenseNormalCholesky, EvaluationError, SolverError, factors::FactorSchema, states::StateSchema,
 };
+use faer::traits::math_utils::{max, one, zero};
 
 /// Full-step Gauss–Newton with a replaceable least-squares backend.
 ///
@@ -37,21 +38,24 @@ impl<B> GaussNewton<B> {
     }
 }
 
-impl Default for GaussNewton<DenseNormalCholesky> {
+impl<R: crate::Real> Default for GaussNewton<DenseNormalCholesky<R>> {
     fn default() -> Self {
         Self::new(DenseNormalCholesky::default())
     }
 }
 
-impl<S: StateSchema, F: FactorSchema<S>, B: LeastSquaresBackend> Optimizer<S, F>
-    for GaussNewton<B>
+impl<S, F, B> Optimizer<S, F> for GaussNewton<B>
+where
+    S: StateSchema,
+    F: FactorSchema<S, Scalar = S::Scalar>,
+    B: LeastSquaresBackend<Scalar = S::Scalar>,
 {
     fn optimize(
         &mut self,
         states: &mut S,
         factors: &mut F,
-        options: &OptimizeOptions,
-    ) -> Result<OptimizeReport, SolverError> {
+        options: &OptimizeOptions<S::Scalar>,
+    ) -> Result<OptimizeReport<S::Scalar>, SolverError> {
         options.validate()?;
         self.layout.clear();
         states.visit(&mut self.layout)?;
@@ -143,8 +147,9 @@ impl<S: StateSchema, F: FactorSchema<S>, B: LeastSquaresBackend> Optimizer<S, F>
             }
             iterations += 1;
             let decrease = current_cost - trial_cost;
-            let converged = trial_cost == 0.0
-                || (decrease >= 0.0 && decrease / current_cost.max(1.0) <= options.cost_tolerance);
+            let converged = trial_cost == zero()
+                || (decrease >= zero()
+                    && decrease / max(&current_cost, &one()) <= options.cost_tolerance);
             current_cost = trial_cost;
             if converged {
                 return Ok(report(

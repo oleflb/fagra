@@ -6,7 +6,7 @@ use faer::{
 use faer_ext::nalgebra::SVector;
 
 use crate::{
-    EvaluationError, JacobianBlock, SolverError,
+    EvaluationError, JacobianBlock, Real, SolverError,
     optimization::{LeastSquaresBackend, norm_inf},
 };
 
@@ -19,15 +19,15 @@ struct Block {
     start: usize,
 }
 
-#[derive(Debug, Default)]
-struct Jacobian {
+#[derive(Debug)]
+struct Jacobian<R> {
     rows: usize,
     cols: usize,
     blocks: Vec<Block>,
-    values: Vec<f64>,
+    values: Vec<R>,
 }
 
-impl LinOp<f64> for Jacobian {
+impl<R: Real> LinOp<R> for Jacobian<R> {
     fn nrows(&self) -> usize {
         self.rows
     }
@@ -37,12 +37,12 @@ impl LinOp<f64> for Jacobian {
     fn apply_scratch(&self, _: usize, _: Par) -> StackReq {
         StackReq::EMPTY
     }
-    fn apply(&self, mut out: MatMut<'_, f64>, rhs: MatRef<'_, f64>, _: Par, _: &mut MemStack) {
+    fn apply(&self, mut out: MatMut<'_, R>, rhs: MatRef<'_, R>, _: Par, _: &mut MemStack) {
         assert_eq!(
             (out.nrows(), rhs.nrows(), out.ncols()),
             (self.rows, self.cols, rhs.ncols())
         );
-        out.fill(0.0);
+        out.fill(R::zero());
         for b in &self.blocks {
             for k in 0..rhs.ncols() {
                 for j in 0..b.cols {
@@ -54,25 +54,19 @@ impl LinOp<f64> for Jacobian {
             }
         }
     }
-    fn conj_apply(
-        &self,
-        out: MatMut<'_, f64>,
-        rhs: MatRef<'_, f64>,
-        par: Par,
-        stack: &mut MemStack,
-    ) {
+    fn conj_apply(&self, out: MatMut<'_, R>, rhs: MatRef<'_, R>, par: Par, stack: &mut MemStack) {
         self.apply(out, rhs, par, stack);
     }
 }
 
-impl BiLinOp<f64> for Jacobian {
+impl<R: Real> BiLinOp<R> for Jacobian<R> {
     fn transpose_apply_scratch(&self, _: usize, _: Par) -> StackReq {
         StackReq::EMPTY
     }
     fn transpose_apply(
         &self,
-        mut out: MatMut<'_, f64>,
-        rhs: MatRef<'_, f64>,
+        mut out: MatMut<'_, R>,
+        rhs: MatRef<'_, R>,
         _: Par,
         _: &mut MemStack,
     ) {
@@ -80,11 +74,11 @@ impl BiLinOp<f64> for Jacobian {
             (out.nrows(), rhs.nrows(), out.ncols()),
             (self.cols, self.rows, rhs.ncols())
         );
-        out.fill(0.0);
+        out.fill(R::zero());
         for b in &self.blocks {
             for k in 0..rhs.ncols() {
                 for j in 0..b.cols {
-                    let mut sum = 0.0;
+                    let mut sum = R::zero();
                     for i in 0..b.rows {
                         sum += self.values[b.start + j * b.rows + i] * rhs[(b.row + i, k)];
                     }
@@ -95,8 +89,8 @@ impl BiLinOp<f64> for Jacobian {
     }
     fn adjoint_apply(
         &self,
-        out: MatMut<'_, f64>,
-        rhs: MatRef<'_, f64>,
+        out: MatMut<'_, R>,
+        rhs: MatRef<'_, R>,
         par: Par,
         stack: &mut MemStack,
     ) {
@@ -114,24 +108,31 @@ impl BiLinOp<f64> for Jacobian {
 ///
 /// Products run sequentially, with an identity preconditioner and a zero initial
 /// step. Iteration exhaustion or a nonfinite step returns `LinearSolveFailed`.
-pub struct Lsmr {
+pub struct Lsmr<R: Real = f64> {
     /// Maximum inner LSMR iterations per step; must be positive. Default: 1000.
     pub max_iterations: usize,
-    /// Relative linearized normal-residual tolerance, in [0, 1). Default: 1e-10.
-    pub relative_tolerance: f64,
-    jacobian: Jacobian,
-    rhs: Vec<f64>,
-    gradient: Vec<f64>,
-    step: Vec<f64>,
+    /// Relative linearized normal-residual tolerance, in [0, 1).
+    /// Defaults to `max(1e-10, 128ε)`, where `ε` is the scalar's machine epsilon.
+    pub relative_tolerance: R,
+    jacobian: Jacobian<R>,
+    rhs: Vec<R>,
+    gradient: Vec<R>,
+    step: Vec<R>,
     scratch: Option<MemBuffer>,
 }
 
-impl Default for Lsmr {
+impl<R: Real> Default for Lsmr<R> {
     fn default() -> Self {
         Self {
             max_iterations: 1000,
-            relative_tolerance: 1e-10,
-            jacobian: Jacobian::default(),
+            relative_tolerance: R::from_f64_impl(1e-10)
+                .max(R::epsilon_impl() * R::from_f64_impl(128.0)),
+            jacobian: Jacobian {
+                rows: 0,
+                cols: 0,
+                blocks: Vec::new(),
+                values: Vec::new(),
+            },
             rhs: Vec::new(),
             gradient: Vec::new(),
             step: Vec::new(),
@@ -140,14 +141,16 @@ impl Default for Lsmr {
     }
 }
 
-impl LeastSquaresBackend for Lsmr {
+impl<R: Real> LeastSquaresBackend for Lsmr<R> {
+    type Scalar = R;
+
     fn prepare(&mut self, dimension: usize) -> Result<(), SolverError> {
-        if self.max_iterations == 0 || !(0.0..1.0).contains(&self.relative_tolerance) {
+        if self.max_iterations == 0 || !(R::zero()..R::one()).contains(&self.relative_tolerance) {
             return Err(SolverError::InvalidOptions);
         }
         self.jacobian.cols = dimension;
-        self.gradient.resize(dimension, 0.0);
-        self.step.resize(dimension, 0.0);
+        self.gradient.resize(dimension, R::zero());
+        self.step.resize(dimension, R::zero());
         Ok(())
     }
 
@@ -156,33 +159,33 @@ impl LeastSquaresBackend for Lsmr {
         self.jacobian.blocks.clear();
         self.jacobian.values.clear();
         self.rhs.clear();
-        self.gradient.fill(0.0);
+        self.gradient.fill(R::zero());
     }
 
-    fn accumulate<const R: usize>(
+    fn accumulate<const ROWS: usize>(
         &mut self,
-        residual: &SVector<f64, R>,
-        jacobians: &[JacobianBlock<'_>],
+        residual: &SVector<R, ROWS>,
+        jacobians: &[JacobianBlock<'_, R>],
         columns: &[usize],
     ) -> Result<(), EvaluationError> {
         let row = self.jacobian.rows;
         self.jacobian.rows = row
-            .checked_add(R)
+            .checked_add(ROWS)
             .ok_or(EvaluationError::DimensionMismatch)?;
-        self.rhs.extend(residual.iter().map(|r| -r));
+        self.rhs.extend(residual.iter().map(|&r| -r));
         for (block, &col) in jacobians.iter().zip(columns) {
             let matrix = block.jacobian();
             self.jacobian.blocks.push(Block {
                 row,
                 col,
-                rows: R,
+                rows: ROWS,
                 cols: matrix.ncols(),
                 start: self.jacobian.values.len(),
             });
             // Pack explicitly: emitted views may have arbitrary strides.
             for j in 0..matrix.ncols() {
-                let mut gradient = 0.0;
-                for i in 0..R {
+                let mut gradient = R::zero();
+                for i in 0..ROWS {
                     let value = matrix[(i, j)];
                     self.jacobian.values.push(value);
                     gradient += value * residual[i];
@@ -193,13 +196,13 @@ impl LeastSquaresBackend for Lsmr {
         Ok(())
     }
 
-    fn gradient_norm(&self) -> Result<f64, SolverError> {
+    fn gradient_norm(&self) -> Result<R, SolverError> {
         norm_inf(&self.gradient)
     }
 
-    fn solve(&mut self) -> Result<&[f64], SolverError> {
+    fn solve(&mut self) -> Result<&[R], SolverError> {
         let (m, n) = (self.jacobian.rows, self.jacobian.cols);
-        self.step.fill(0.0);
+        self.step.fill(R::zero());
         if m == 0 || n == 0 {
             return Ok(&self.step);
         }
@@ -207,8 +210,8 @@ impl LeastSquaresBackend for Lsmr {
         let precond = IdentityPrecond { dim: n };
         // faer 0.24.4 omits wbar and vold from lsmr_scratch; both are n-by-1.
         // Remove this extra space when upstream's scratch calculation is fixed.
-        let vector = faer::linalg::temp_mat_scratch::<f64>(n, 1);
-        let req = lsmr::lsmr_scratch::<f64>(precond, &self.jacobian, 1, Par::Seq)
+        let vector = faer::linalg::temp_mat_scratch::<R>(n, 1);
+        let req = lsmr::lsmr_scratch::<R>(precond, &self.jacobian, 1, Par::Seq)
             .and(vector)
             .and(vector);
         if !self
@@ -248,6 +251,7 @@ mod tests {
 
     struct Pair;
     impl Variable for Pair {
+        type Scalar = f64;
         type Tangent = ();
         const DOF: usize = 2;
         fn tangent_from_slice(_: &[f64]) {}

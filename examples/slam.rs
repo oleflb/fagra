@@ -16,6 +16,7 @@ pub struct Pose {
 }
 
 impl Variable for Pose {
+    type Scalar = f64;
     type Tangent = SVector<f64, 6>;
     const DOF: usize = 6;
 
@@ -36,6 +37,7 @@ pub struct CameraIntrinsics {
 }
 
 impl Variable for CameraIntrinsics {
+    type Scalar = f64;
     type Tangent = SVector<f64, 4>;
     const DOF: usize = 4;
 
@@ -56,6 +58,7 @@ impl Variable for CameraIntrinsics {
 pub struct Landmark(pub Vector3<f64>);
 
 impl Variable for Landmark {
+    type Scalar = f64;
     type Tangent = Vector3<f64>;
     const DOF: usize = 3;
 
@@ -74,6 +77,7 @@ pub struct PosePrior {
 }
 
 impl<S: StateStore<Pose>> Factor<S> for PosePrior {
+    type Scalar = f64;
     fn visit_variables(&self, mut visitor: impl FnMut(BlockId)) {
         visitor(self.pose.block_id());
     }
@@ -83,7 +87,7 @@ impl<S: StateStore<Pose>> Factor<S> for PosePrior {
         todo!("Application geometry: prior cost without Jacobians")
     }
 
-    fn linearize<L: LinearizationSink>(
+    fn linearize<L: LinearizationSink<Scalar = f64>>(
         &self,
         states: &S,
         _sink: &mut L,
@@ -109,6 +113,7 @@ impl<S> FactorBatch<S> for FrameReprojections
 where
     S: StateStore<Pose> + StateStore<CameraIntrinsics> + StateStore<Landmark>,
 {
+    type Scalar = f64;
     type Factor = Reprojection;
 
     fn visit_variables(&self, factor: &Reprojection, mut visitor: impl FnMut(BlockId)) {
@@ -139,7 +144,7 @@ where
         Ok(cost)
     }
 
-    fn linearize<L: LinearizationSink>(
+    fn linearize<L: LinearizationSink<Scalar = f64>>(
         &self,
         states: &S,
         factors: FactorSelection<'_, Reprojection>,

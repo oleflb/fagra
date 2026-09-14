@@ -3,7 +3,7 @@ use std::iter::FusedIterator;
 use crate::key::{LocalKey, PoolId, RawKey};
 use crate::storage::{BatchPool, FactorPool};
 use crate::{
-    BlockId, EvaluationError, FactorId, FactorKey, KeyError, LinearizationSink, SolverError,
+    BlockId, EvaluationError, FactorId, FactorKey, KeyError, LinearizationSink, Real, SolverError,
 };
 
 /// An independent graph contribution evaluated against compatible state storage.
@@ -12,6 +12,9 @@ use crate::{
 /// lifetime. For shared computation across independently removable factors,
 /// implement [`FactorBatch`] instead.
 pub trait Factor<S> {
+    /// Scalar used for this factor's cost, residuals, and Jacobians.
+    type Scalar: Real;
+
     /// Visit every variable dependency, including inputs shared by its residuals.
     ///
     /// This describes incidence, not a dense clique in the numerical system.
@@ -21,14 +24,14 @@ pub trait Factor<S> {
     ///
     /// The objective must match [`linearize`](Self::linearize). Report invalid
     /// model evaluations rather than silently dropping measurements.
-    fn cost(&self, states: &S) -> Result<f64, EvaluationError>;
+    fn cost(&self, states: &S) -> Result<Self::Scalar, EvaluationError>;
 
     /// Emit residuals and Jacobians into an already established factor scope.
     ///
     /// Do not call [`LinearizationSink::factor`] here: the solver owns this scope.
     /// See [factor scopes](crate::LinearizationSink#factor-scopes) for a comparison
     /// with batch emission.
-    fn linearize<L: LinearizationSink>(
+    fn linearize<L: LinearizationSink<Scalar = Self::Scalar>>(
         &self,
         states: &S,
         sink: &mut L,
@@ -41,6 +44,9 @@ pub trait Factor<S> {
 /// [`Factor`] implementation. Prepare shared values inside each call, then
 /// evaluate only the supplied selection. Empty selections do no work.
 pub trait FactorBatch<S> {
+    /// Scalar used by the shared evaluator and its selected factors.
+    type Scalar: Real;
+
     /// One factor's local data; shared inputs live in `Self`.
     type Factor;
 
@@ -54,7 +60,7 @@ pub trait FactorBatch<S> {
         &self,
         states: &S,
         factors: FactorSelection<'_, Self::Factor>,
-    ) -> Result<f64, EvaluationError>;
+    ) -> Result<Self::Scalar, EvaluationError>;
 
     /// Prepare shared intermediates once and linearize the selected factors.
     ///
@@ -62,7 +68,7 @@ pub trait FactorBatch<S> {
     /// scope owns all residual blocks emitted for that factor.
     /// See [factor scopes](crate::LinearizationSink#factor-scopes) for a comparison
     /// with ordinary factor emission.
-    fn linearize<L: LinearizationSink>(
+    fn linearize<L: LinearizationSink<Scalar = Self::Scalar>>(
         &self,
         states: &S,
         factors: FactorSelection<'_, Self::Factor>,
@@ -142,8 +148,11 @@ impl<F> FusedIterator for FactorSelection<'_, F> {}
 /// Internal macro plumbing generated once per payload type. Unlike typed pool
 /// access, this interface does not require the caller to know a batch's model.
 pub trait FactorStore<S, P> {
+    /// Scalar returned by the registered evaluator.
+    type Scalar: Real;
+
     /// Validate the key and evaluate one factor's nonlinear cost against `states`.
-    fn factor_cost(&self, states: &S, key: FactorKey<P>) -> Result<f64, SolverError>;
+    fn factor_cost(&self, states: &S, key: FactorKey<P>) -> Result<Self::Scalar, SolverError>;
 
     /// Remove one payload from storage, preserving sibling handles.
     ///
@@ -157,12 +166,16 @@ pub trait FactorStore<S, P> {
 /// Internal macro plumbing. Storage remains reusable across compatible state
 /// schemas; evaluator bounds are checked for each `S`.
 pub trait FactorSchema<S>: Default {
+    /// Scalar shared by every evaluator in this schema.
+    type Scalar: Real;
+
     /// Visit each declared family once, including empty families, in declaration order.
     ///
     /// Stops at the first visitor error without rolling back earlier mutations.
     /// An empty schema returns `Ok(())`. Mutable access also supports internal
     /// editing passes; evaluation passes can reborrow pools immutably.
-    fn visit<V: FactorVisitor<S>>(&mut self, visitor: &mut V) -> Result<(), V::Error>;
+    fn visit<V: FactorVisitor<S, Self::Scalar>>(&mut self, visitor: &mut V)
+    -> Result<(), V::Error>;
 }
 
 /// One statically dispatched solver pass over ordinary and batched factor families.
@@ -170,15 +183,18 @@ pub trait FactorSchema<S>: Default {
 /// Linearization and cost evaluation are separate visitor implementations, not
 /// generated macro code. A batch call receives the whole family; the pass groups
 /// selected payloads by batch before invoking [`FactorBatch`].
-pub trait FactorVisitor<S> {
+pub trait FactorVisitor<S, R: Real = f64> {
     /// Failure returned by this pass; use [`std::convert::Infallible`] if none.
     type Error;
 
     /// Process one homogeneous ordinary-factor pool.
-    fn standalone<T: Factor<S>>(&mut self, pool: &mut FactorPool<T>) -> Result<(), Self::Error>;
+    fn standalone<T: Factor<S, Scalar = R>>(
+        &mut self,
+        pool: &mut FactorPool<T>,
+    ) -> Result<(), Self::Error>;
 
     /// Process one family of batches sharing a model and payload type.
-    fn batch<B: FactorBatch<S>>(
+    fn batch<B: FactorBatch<S, Scalar = R>>(
         &mut self,
         pool: &mut BatchPool<B, B::Factor>,
     ) -> Result<(), Self::Error>;
@@ -195,6 +211,9 @@ pub trait FactorVisitor<S> {
 /// Internally, the macro generates typed pool access, payload-key routing, and
 /// one static traversal over library-owned ordinary and batch-family pools.
 /// Traversal visits even empty families in declaration order and stops on error.
+/// A declaration `Factors<R> { priors: Prior<R> }` introduces one scalar parameter
+/// bounded by [`Real`]. All ordinary and batched evaluators must have `Scalar = R`.
+/// Declarations without a parameter use `f64`; payloads need no scalar trait.
 ///
 /// ```no_run
 /// use fagra::factors;
@@ -225,51 +244,69 @@ pub trait FactorVisitor<S> {
 /// ```
 #[macro_export]
 macro_rules! factors {
+    ($(#[$attr:meta])* $vis:vis $name:ident<$scalar:ident> { $($fields:tt)* }) => {
+        $crate::factors!(@parse [$(#[$attr])* $vis $name] [$scalar] [$scalar] [] [] []; $($fields)* ,);
+    };
     ($(#[$attr:meta])* $vis:vis $name:ident { $($fields:tt)* }) => {
-        $crate::factors!(@parse [$(#[$attr])* $vis $name] [] [] []; $($fields)* ,);
+        $crate::factors!(@parse [$(#[$attr])* $vis $name] [] [f64] [] [] []; $($fields)* ,);
     };
     (@parse [$(#[$attr:meta])* $vis:vis $name:ident]
+        [$($scalar:ident)?] [$real:ty]
         [$($field:ident: $pool:ty,)*] [$($bounds:tt)*]
         [$($kind:ident $visit_field:ident,)*];
     ) => {
         $(#[$attr])*
-        #[derive(Default)]
         #[allow(dead_code)]
-        $vis struct $name {
+        $vis struct $name$(<$scalar: $crate::Real>)? {
             $($field: $pool,)*
+            __fagra_scalar: ::core::marker::PhantomData<$real>,
         }
 
-        impl<S> $crate::__private::FactorSchema<S> for $name
+        impl$(<$scalar: $crate::Real>)? ::core::default::Default for $name$(<$scalar>)? {
+            fn default() -> Self {
+                Self {
+                    $($field: ::core::default::Default::default(),)*
+                    __fagra_scalar: ::core::marker::PhantomData,
+                }
+            }
+        }
+
+        impl<__S $(, $scalar: $crate::Real)?> $crate::__private::FactorSchema<__S> for $name$(<$scalar>)?
         where $($bounds)*
         {
-            fn visit<V: $crate::__private::FactorVisitor<S>>(
+            type Scalar = $real;
+
+            fn visit<__Visitor: $crate::__private::FactorVisitor<__S, $real>>(
                 &mut self,
-                _visitor: &mut V,
-            ) -> ::core::result::Result<(), V::Error> {
+                _visitor: &mut __Visitor,
+            ) -> ::core::result::Result<(), __Visitor::Error> {
                 $(_visitor.$kind(&mut self.$visit_field)?;)*
                 ::core::result::Result::Ok(())
             }
         }
     };
-    (@parse [$($header:tt)*] [$($fields:tt)*] [$($bounds:tt)*]
+    (@parse [$($header:tt)*] [$($scalar:ident)?] [$real:ty] [$($fields:tt)*] [$($bounds:tt)*]
         [$($visits:tt)*]; , $($rest:tt)*
     ) => {
-        $crate::factors!(@parse [$($header)*] [$($fields)*] [$($bounds)*]
+        $crate::factors!(@parse [$($header)*] [$($scalar)?] [$real] [$($fields)*] [$($bounds)*]
             [$($visits)*]; $($rest)*);
     };
     (@parse [$(#[$attr:meta])* $vis:vis $name:ident]
+        [$($scalar:ident)?] [$real:ty]
         [$($fields:tt)*] [$($bounds:tt)*] [$($visits:tt)*];
         $field:ident: Batch<$model:ty, $factor:ty>, $($rest:tt)*
     ) => {
-        $crate::factors!(@access $name, $field,
+        $crate::factors!(@access [$name $($scalar)?], $field,
             $crate::__private::BatchPool<$model, $factor>);
 
-        impl<S> $crate::__private::FactorStore<S, $factor> for $name
-        where $model: $crate::FactorBatch<S, Factor = $factor>,
+        impl<__S $(, $scalar: $crate::Real)?> $crate::__private::FactorStore<__S, $factor> for $name$(<$scalar>)?
+        where $model: $crate::FactorBatch<__S, Scalar = $real, Factor = $factor>,
         {
+            type Scalar = $real;
+
             fn factor_cost(
-                &self, states: &S, key: $crate::FactorKey<$factor>,
-            ) -> ::core::result::Result<f64, $crate::SolverError> {
+                &self, states: &__S, key: $crate::FactorKey<$factor>,
+            ) -> ::core::result::Result<$real, $crate::SolverError> {
                 self.$field.factor_cost(states, key)
             }
 
@@ -280,23 +317,26 @@ macro_rules! factors {
             }
         }
 
-        $crate::factors!(@parse [$(#[$attr])* $vis $name]
+        $crate::factors!(@parse [$(#[$attr])* $vis $name] [$($scalar)?] [$real]
             [$($fields)* $field: $crate::__private::BatchPool<$model, $factor>,]
-            [$($bounds)* $model: $crate::FactorBatch<S, Factor = $factor>,]
+            [$($bounds)* $model: $crate::FactorBatch<__S, Scalar = $real, Factor = $factor>,]
             [$($visits)* batch $field,]; $($rest)*);
     };
     (@parse [$(#[$attr:meta])* $vis:vis $name:ident]
+        [$($scalar:ident)?] [$real:ty]
         [$($fields:tt)*] [$($bounds:tt)*] [$($visits:tt)*];
         $field:ident: $factor:ty, $($rest:tt)*
     ) => {
-        $crate::factors!(@access $name, $field, $crate::__private::FactorPool<$factor>);
+        $crate::factors!(@access [$name $($scalar)?], $field, $crate::__private::FactorPool<$factor>);
 
-        impl<S> $crate::__private::FactorStore<S, $factor> for $name
-        where $factor: $crate::Factor<S>,
+        impl<__S $(, $scalar: $crate::Real)?> $crate::__private::FactorStore<__S, $factor> for $name$(<$scalar>)?
+        where $factor: $crate::Factor<__S, Scalar = $real>,
         {
+            type Scalar = $real;
+
             fn factor_cost(
-                &self, states: &S, key: $crate::FactorKey<$factor>,
-            ) -> ::core::result::Result<f64, $crate::SolverError> {
+                &self, states: &__S, key: $crate::FactorKey<$factor>,
+            ) -> ::core::result::Result<$real, $crate::SolverError> {
                 self.$field.factor_cost(states, key)
             }
 
@@ -307,13 +347,13 @@ macro_rules! factors {
             }
         }
 
-        $crate::factors!(@parse [$(#[$attr])* $vis $name]
+        $crate::factors!(@parse [$(#[$attr])* $vis $name] [$($scalar)?] [$real]
             [$($fields)* $field: $crate::__private::FactorPool<$factor>,]
-            [$($bounds)* $factor: $crate::Factor<S>,]
+            [$($bounds)* $factor: $crate::Factor<__S, Scalar = $real>,]
             [$($visits)* standalone $field,]; $($rest)*);
     };
-    (@access $name:ident, $field:ident, $pool:ty) => {
-        impl $crate::__private::PoolAccess<$pool> for $name {
+    (@access [$name:ident $($scalar:ident)?], $field:ident, $pool:ty) => {
+        impl$(<$scalar: $crate::Real>)? $crate::__private::PoolAccess<$pool> for $name$(<$scalar>)? {
             fn pool(&self) -> &$pool {
                 &self.$field
             }

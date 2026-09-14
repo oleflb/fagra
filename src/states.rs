@@ -1,5 +1,5 @@
 use crate::storage::{PoolAccess, StatePool};
-use crate::{KeyError, StateKey, Variable};
+use crate::{KeyError, Real, StateKey, Variable};
 
 /// Statically selected, checked access to variables of type `T`.
 ///
@@ -28,12 +28,15 @@ where
 /// Internal macro plumbing. `Default` constructs empty pools without requiring
 /// variables to implement `Default`.
 pub trait StateSchema: Default {
+    /// Scalar shared by every variable in this schema.
+    type Scalar: Real;
+
     /// Visit every declared pool once, including empty pools, in declaration order.
     ///
     /// Stops at the first visitor error without rolling back earlier mutations.
     /// A solver must run an infallible rejection pass after failed trial staging.
     /// An empty schema returns `Ok(())` without calling the visitor.
-    fn visit<V: StateVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Error>;
+    fn visit<V: StateVisitor<Self::Scalar>>(&mut self, visitor: &mut V) -> Result<(), V::Error>;
 }
 
 /// One statically dispatched solver pass over heterogeneous state pools.
@@ -41,12 +44,13 @@ pub trait StateSchema: Default {
 /// Implement operations such as staging, acceptance, and rejection in ordinary
 /// library code. Use [`std::convert::Infallible`] for passes that cannot fail.
 /// Visitors receive pools, not individual values; typed iteration belongs to the pool.
-pub trait StateVisitor {
+pub trait StateVisitor<R: Real = f64> {
     /// Failure returned by this pass.
     type Error;
 
     /// Process one state family. Read-only passes may simply reborrow the pool.
-    fn pool<T: Variable>(&mut self, pool: &mut StatePool<T>) -> Result<(), Self::Error>;
+    fn pool<T: Variable<Scalar = R>>(&mut self, pool: &mut StatePool<T>)
+    -> Result<(), Self::Error>;
 }
 
 /// Declare a homogeneous state pool for each variable type.
@@ -56,11 +60,15 @@ pub trait StateVisitor {
 /// Internally, fields are library-owned pools. The macro generates typed pool
 /// access and one static traversal; the library supplies `StateStore::get`.
 /// Traversal visits even empty pools in declaration order and stops on error.
+/// A declaration `States<R> { values: Value<R> }` introduces one scalar parameter
+/// bounded by [`Real`]. Every variable must have `Scalar = R`. Declarations
+/// without a parameter use `f64`. Empty generic schemas are supported.
 ///
 /// ```no_run
 /// use fagra::{states, Variable};
 /// # struct Pose;
 /// # impl Variable for Pose {
+/// #     type Scalar = f64;
 /// #     type Tangent = [f64; 6];
 /// #     const DOF: usize = 6;
 /// #     fn tangent_from_slice(_: &[f64]) -> Self::Tangent { todo!() }
@@ -75,27 +83,47 @@ pub trait StateVisitor {
 /// ```
 #[macro_export]
 macro_rules! states {
-    ($(#[$attr:meta])* $vis:vis $name:ident {
+    ($(#[$attr:meta])* $vis:vis $name:ident<$scalar:ident> { $($fields:tt)* }) => {
+        $crate::states!(@impl [$(#[$attr])* $vis $name] [$scalar] [$scalar] { $($fields)* });
+    };
+    ($(#[$attr:meta])* $vis:vis $name:ident { $($fields:tt)* }) => {
+        $crate::states!(@impl [$(#[$attr])* $vis $name] [] [f64] { $($fields)* });
+    };
+    (@impl [$(#[$attr:meta])* $vis:vis $name:ident] [$($scalar:ident)?] [$real:ty] {
         $($field:ident: $ty:ty),* $(,)?
     }) => {
         $(#[$attr])*
-        #[derive(Default)]
         #[allow(dead_code)]
-        $vis struct $name {
+        $vis struct $name$(<$scalar: $crate::Real>)? {
             $($field: $crate::__private::StatePool<$ty>,)*
+            __fagra_scalar: ::core::marker::PhantomData<$real>,
         }
 
-        impl $crate::__private::StateSchema for $name {
-            fn visit<V: $crate::__private::StateVisitor>(
+        impl$(<$scalar: $crate::Real>)? ::core::default::Default for $name$(<$scalar>)? {
+            fn default() -> Self {
+                Self {
+                    $($field: ::core::default::Default::default(),)*
+                    __fagra_scalar: ::core::marker::PhantomData,
+                }
+            }
+        }
+
+        impl$(<$scalar: $crate::Real>)? $crate::__private::StateSchema for $name$(<$scalar>)? {
+            type Scalar = $real;
+
+            fn visit<__Visitor: $crate::__private::StateVisitor<$real>>(
                 &mut self,
-                _visitor: &mut V,
-            ) -> ::core::result::Result<(), V::Error> {
+                _visitor: &mut __Visitor,
+            ) -> ::core::result::Result<(), __Visitor::Error> {
                 $(_visitor.pool(&mut self.$field)?;)*
                 ::core::result::Result::Ok(())
             }
         }
 
-        $(impl $crate::__private::PoolAccess<$crate::__private::StatePool<$ty>> for $name {
+        $crate::states!(@access [$name $($scalar)?] $($field: $ty,)*);
+    };
+    (@access [$name:ident $($scalar:ident)?] $field:ident: $ty:ty, $($rest:tt)*) => {
+        impl$(<$scalar: $crate::Real>)? $crate::__private::PoolAccess<$crate::__private::StatePool<$ty>> for $name$(<$scalar>)? {
             fn pool(&self) -> &$crate::__private::StatePool<$ty> {
                 &self.$field
             }
@@ -103,6 +131,8 @@ macro_rules! states {
             fn pool_mut(&mut self) -> &mut $crate::__private::StatePool<$ty> {
                 &mut self.$field
             }
-        })*
+        }
+        $crate::states!(@access [$name $($scalar)?] $($rest)*);
     };
+    (@access [$name:ident $($scalar:ident)?]) => {};
 }

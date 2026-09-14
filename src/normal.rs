@@ -12,7 +12,7 @@ use faer::{
 use faer_ext::{IntoFaer, nalgebra::SVector};
 
 use crate::{
-    EvaluationError, JacobianBlock, SolverError,
+    EvaluationError, JacobianBlock, Real, SolverError,
     optimization::{LeastSquaresBackend, norm_inf},
 };
 
@@ -26,14 +26,14 @@ use crate::{
 /// A step requires a positive-definite normal matrix (full column rank of J).
 /// Normal equations square J's condition number; use a future QR backend for
 /// ill-conditioned problems. Matrix storage is O(n²), factorization O(n³).
-pub struct DenseNormalCholesky {
-    normal: Mat<f64>,
-    rhs: Vec<f64>,
+pub struct DenseNormalCholesky<R: Real = f64> {
+    normal: Mat<R>,
+    rhs: Vec<R>,
     scratch: Option<MemBuffer>,
     scratch_dimension: usize,
 }
 
-impl Default for DenseNormalCholesky {
+impl<R: Real> Default for DenseNormalCholesky<R> {
     fn default() -> Self {
         Self {
             normal: Mat::new(),
@@ -44,23 +44,24 @@ impl Default for DenseNormalCholesky {
     }
 }
 
-impl LeastSquaresBackend for DenseNormalCholesky {
+impl<R: Real> LeastSquaresBackend for DenseNormalCholesky<R> {
+    type Scalar = R;
+
     fn prepare(&mut self, dimension: usize) -> Result<(), SolverError> {
         dimension
             .checked_mul(dimension)
-            .and_then(|n| n.checked_mul(8))
+            .and_then(|n| n.checked_mul(size_of::<R>()))
             .filter(|&bytes| bytes <= isize::MAX as usize)
             .ok_or(EvaluationError::DimensionMismatch)?;
-        self.normal.resize_with(dimension, dimension, |_, _| 0.0);
-        self.rhs.resize(dimension, 0.0);
+        self.normal
+            .resize_with(dimension, dimension, |_, _| R::zero());
+        self.rhs.resize(dimension, R::zero());
         if dimension > self.scratch_dimension {
-            self.scratch = Some(MemBuffer::new(
-                llt::factor::cholesky_in_place_scratch::<f64>(
-                    dimension,
-                    Par::Seq,
-                    Default::default(),
-                ),
-            ));
+            self.scratch = Some(MemBuffer::new(llt::factor::cholesky_in_place_scratch::<R>(
+                dimension,
+                Par::Seq,
+                Default::default(),
+            )));
             self.scratch_dimension = dimension;
         }
         Ok(())
@@ -73,20 +74,20 @@ impl LeastSquaresBackend for DenseNormalCholesky {
                 .as_mut()
                 .col_mut(col)
                 .subrows_mut(col, n - col)
-                .fill(0.0);
+                .fill(R::zero());
         }
-        self.rhs.fill(0.0);
+        self.rhs.fill(R::zero());
     }
 
-    fn accumulate<const R: usize>(
+    fn accumulate<const ROWS: usize>(
         &mut self,
-        residual: &SVector<f64, R>,
-        jacobians: &[JacobianBlock<'_>],
+        residual: &SVector<R, ROWS>,
+        jacobians: &[JacobianBlock<'_, R>],
         columns: &[usize],
     ) -> Result<(), EvaluationError> {
-        let residual = MatRef::from_column_major_slice(residual.as_slice(), R, 1);
+        let residual = MatRef::from_column_major_slice(residual.as_slice(), ROWS, 1);
         for (i, block) in jacobians.iter().enumerate() {
-            let left: MatRef<'_, f64> = block.jacobian().into_faer();
+            let left: MatRef<'_, R> = block.jacobian().into_faer();
             let width = left.ncols();
             if width == 0 {
                 continue;
@@ -101,7 +102,7 @@ impl LeastSquaresBackend for DenseNormalCholesky {
                 Accum::Add,
                 left.transpose(),
                 residual,
-                -1.0,
+                -R::one(),
                 Par::Seq,
             );
             triangular::matmul(
@@ -114,11 +115,11 @@ impl LeastSquaresBackend for DenseNormalCholesky {
                 BlockStructure::Rectangular,
                 left,
                 BlockStructure::Rectangular,
-                1.0,
+                R::one(),
                 Par::Seq,
             );
             for j in 0..i {
-                let right: MatRef<'_, f64> = jacobians[j].jacobian().into_faer();
+                let right: MatRef<'_, R> = jacobians[j].jacobian().into_faer();
                 if right.ncols() == 0 {
                     continue;
                 }
@@ -136,7 +137,7 @@ impl LeastSquaresBackend for DenseNormalCholesky {
                     Accum::Add,
                     lhs.transpose(),
                     rhs,
-                    1.0,
+                    R::one(),
                     Par::Seq,
                 );
             }
@@ -144,11 +145,11 @@ impl LeastSquaresBackend for DenseNormalCholesky {
         Ok(())
     }
 
-    fn gradient_norm(&self) -> Result<f64, SolverError> {
+    fn gradient_norm(&self) -> Result<R, SolverError> {
         norm_inf(&self.rhs)
     }
 
-    fn solve(&mut self) -> Result<&[f64], SolverError> {
+    fn solve(&mut self) -> Result<&[R], SolverError> {
         let n = self.rhs.len();
         if n == 0 {
             return Ok(&self.rhs);
@@ -187,6 +188,7 @@ mod tests {
 
     struct Pair;
     impl Variable for Pair {
+        type Scalar = f64;
         type Tangent = [f64; 2];
         const DOF: usize = 2;
         fn tangent_from_slice(delta: &[f64]) -> Self::Tangent {

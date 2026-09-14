@@ -11,6 +11,15 @@ use fagra::{
     StateStore, TerminationReason, Variable,
 };
 
+#[path = "optimizer/precision.rs"]
+mod precision;
+#[allow(dead_code)]
+#[path = "../examples/scalar_prior.rs"]
+mod scalar;
+
+use precision::Square;
+use scalar::Scalar;
+
 // Count only allocations on the thread currently exercising an optimization call.
 // The unsafe forwarding is confined to the test allocator; production uses safe APIs.
 struct CountingAllocator;
@@ -62,30 +71,19 @@ fn allocations<T>(f: impl FnOnce() -> T) -> (T, usize) {
     (result, count)
 }
 
-struct Scalar(f64);
-impl Variable for Scalar {
-    type Tangent = f64;
-    const DOF: usize = 1;
-    fn tangent_from_slice(delta: &[f64]) -> f64 {
-        delta[0]
-    }
-    fn retract(&self, delta: &f64) -> Self {
-        Self(self.0 + delta)
-    }
-}
-
 struct Prior {
     key: StateKey<Scalar>,
     target: Rc<Cell<f64>>,
 }
 impl<S: StateStore<Scalar>> Factor<S> for Prior {
+    type Scalar = f64;
     fn visit_variables(&self, mut visit: impl FnMut(BlockId)) {
         visit(self.key.block_id());
     }
     fn cost(&self, states: &S) -> Result<f64, EvaluationError> {
         Ok(0.5 * (states.get(self.key)?.0 - self.target.get()).powi(2))
     }
-    fn linearize<L: LinearizationSink>(
+    fn linearize<L: LinearizationSink<Scalar = f64>>(
         &self,
         states: &S,
         sink: &mut L,
@@ -100,15 +98,12 @@ impl<S: StateStore<Scalar>> Factor<S> for Prior {
     }
 }
 
-struct Quadratic {
-    key: StateKey<Scalar>,
-}
-
 struct Difference {
     left: StateKey<Scalar>,
     right: StateKey<Scalar>,
 }
 impl<S: StateStore<Scalar>> Factor<S> for Difference {
+    type Scalar = f64;
     fn visit_variables(&self, mut visit: impl FnMut(BlockId)) {
         visit(self.left.block_id());
         visit(self.right.block_id());
@@ -116,7 +111,7 @@ impl<S: StateStore<Scalar>> Factor<S> for Difference {
     fn cost(&self, states: &S) -> Result<f64, EvaluationError> {
         Ok(0.5 * (states.get(self.left)?.0 - states.get(self.right)?.0).powi(2))
     }
-    fn linearize<L: LinearizationSink>(
+    fn linearize<L: LinearizationSink<Scalar = f64>>(
         &self,
         states: &S,
         sink: &mut L,
@@ -130,31 +125,9 @@ impl<S: StateStore<Scalar>> Factor<S> for Difference {
         )
     }
 }
-impl<S: StateStore<Scalar>> Factor<S> for Quadratic {
-    fn visit_variables(&self, mut visit: impl FnMut(BlockId)) {
-        visit(self.key.block_id());
-    }
-    fn cost(&self, states: &S) -> Result<f64, EvaluationError> {
-        Ok(0.5 * (states.get(self.key)?.0.powi(2) - 1.0).powi(2))
-    }
-    fn linearize<L: LinearizationSink>(
-        &self,
-        states: &S,
-        sink: &mut L,
-    ) -> Result<(), EvaluationError> {
-        let x = states.get(self.key)?.0;
-        sink.residual(
-            &SVector::<f64, 1>::new(x * x - 1.0),
-            &[JacobianBlock::new(
-                self.key,
-                &SMatrix::<f64, 1, 1>::new(2.0 * x),
-            )],
-        )
-    }
-}
-
 struct Pair([f64; 2]);
 impl Variable for Pair {
+    type Scalar = f64;
     type Tangent = [f64; 2];
     const DOF: usize = 2;
     fn tangent_from_slice(delta: &[f64]) -> [f64; 2] {
@@ -170,6 +143,7 @@ struct Coupled {
     y: StateKey<Pair>,
 }
 impl<S: StateStore<Scalar> + StateStore<Pair>> Factor<S> for Coupled {
+    type Scalar = f64;
     fn visit_variables(&self, mut visit: impl FnMut(BlockId)) {
         visit(self.x.block_id());
         visit(self.y.block_id());
@@ -179,7 +153,7 @@ impl<S: StateStore<Scalar> + StateStore<Pair>> Factor<S> for Coupled {
         let [y, z] = states.get(self.y)?.0;
         Ok(0.5 * ((x + y - 3.0).powi(2) + (y + z - 5.0).powi(2) + (x + 2.0 * z - 7.0).powi(2)))
     }
-    fn linearize<L: LinearizationSink>(
+    fn linearize<L: LinearizationSink<Scalar = f64>>(
         &self,
         states: &S,
         sink: &mut L,
@@ -204,6 +178,7 @@ struct Domain {
     target: Rc<Cell<f64>>,
 }
 impl<S: StateStore<Scalar>> Factor<S> for Domain {
+    type Scalar = f64;
     fn visit_variables(&self, mut visit: impl FnMut(BlockId)) {
         visit(self.key.block_id());
     }
@@ -214,7 +189,7 @@ impl<S: StateStore<Scalar>> Factor<S> for Domain {
         }
         Ok(0.5 * (x - self.target.get()).powi(2))
     }
-    fn linearize<L: LinearizationSink>(
+    fn linearize<L: LinearizationSink<Scalar = f64>>(
         &self,
         states: &S,
         sink: &mut L,
@@ -237,6 +212,7 @@ struct BatchModel {
     omit: Rc<Cell<bool>>,
 }
 impl<S: StateStore<Scalar>> FactorBatch<S> for BatchModel {
+    type Scalar = f64;
     type Factor = Measurement;
     fn visit_variables(&self, factor: &Measurement, mut visit: impl FnMut(BlockId)) {
         visit(factor.key.block_id());
@@ -250,7 +226,7 @@ impl<S: StateStore<Scalar>> FactorBatch<S> for BatchModel {
             .map(|(_, f)| Ok(0.5 * (states.get(f.key)?.0 - f.target).powi(2)))
             .sum()
     }
-    fn linearize<L: LinearizationSink>(
+    fn linearize<L: LinearizationSink<Scalar = f64>>(
         &self,
         states: &S,
         factors: FactorSelection<'_, Measurement>,
@@ -280,7 +256,7 @@ impl<S: StateStore<Scalar>> FactorBatch<S> for BatchModel {
 fagra::states! { States { scalars: Scalar, pairs: Pair } }
 fagra::factors! {
     Factors {
-        priors: Prior, quadratics: Quadratic, coupled: Coupled, differences: Difference,
+        priors: Prior, squares: Square<f64>, coupled: Coupled, differences: Difference,
         domains: Domain, batch: Batch<BatchModel, Measurement>,
     }
 }
@@ -301,7 +277,7 @@ fn lsmr_optimizes_ordinary_and_batched_factors_and_reuses_workspace() {
 
     let mut graph = Graph::new();
     let x = graph.add(Scalar(2.0));
-    graph.add_factor(Quadratic { key: x }).unwrap();
+    graph.add_factor(Square(x)).unwrap();
     graph.optimize_with(&mut method, &options).unwrap();
     assert!((graph.get(x).unwrap().0 - 1.0).abs() < 1e-8);
 
@@ -360,7 +336,7 @@ fn scalar_nonlinear_and_coupled_problems_converge() {
 
     let mut graph = Graph::new();
     let x = graph.add(Scalar(2.0));
-    graph.add_factor(Quadratic { key: x }).unwrap();
+    graph.add_factor(Square(x)).unwrap();
     let report = graph.optimize().unwrap();
     assert!(report.iterations > 1);
     assert!((graph.get(x).unwrap().0 - 1.0).abs() < 1e-8);
@@ -380,7 +356,7 @@ fn scalar_nonlinear_and_coupled_problems_converge() {
 fn pure_gn_accepts_uphill_steps_and_keeps_accepted_progress_on_limit() {
     let mut graph = Graph::new();
     let x = graph.add(Scalar(0.1));
-    let factor = graph.add_factor(Quadratic { key: x }).unwrap();
+    let factor = graph.add_factor(Square(x)).unwrap();
     let initial = graph.factor_cost(factor).unwrap();
     let options = OptimizeOptions {
         max_iterations: 1,
@@ -569,6 +545,7 @@ struct Bad {
     mode: BadEmission,
 }
 impl<S> Factor<S> for Bad {
+    type Scalar = f64;
     fn visit_variables(&self, mut visit: impl FnMut(BlockId)) {
         visit(self.key.block_id());
         visit(self.extra.block_id());
@@ -576,7 +553,11 @@ impl<S> Factor<S> for Bad {
     fn cost(&self, _: &S) -> Result<f64, EvaluationError> {
         Ok(0.5)
     }
-    fn linearize<L: LinearizationSink>(&self, _: &S, sink: &mut L) -> Result<(), EvaluationError> {
+    fn linearize<L: LinearizationSink<Scalar = f64>>(
+        &self,
+        _: &S,
+        sink: &mut L,
+    ) -> Result<(), EvaluationError> {
         let jacobian = SMatrix::<f64, 1, 1>::new(1.0);
         let residual = SVector::<f64, 1>::new(1.0);
         match self.mode {
@@ -672,6 +653,7 @@ fn invalid_emissions_and_singular_systems_never_change_states() {
 fn one_factor_can_emit_multiple_residual_blocks_for_the_same_variable() {
     struct TwoMeasurements(StateKey<Scalar>);
     impl<S: StateStore<Scalar>> Factor<S> for TwoMeasurements {
+        type Scalar = f64;
         fn visit_variables(&self, mut visit: impl FnMut(BlockId)) {
             visit(self.0.block_id());
         }
@@ -679,7 +661,7 @@ fn one_factor_can_emit_multiple_residual_blocks_for_the_same_variable() {
             let x = states.get(self.0)?.0;
             Ok(0.5 * ((x - 1.0).powi(2) + (x - 3.0).powi(2)))
         }
-        fn linearize<L: LinearizationSink>(
+        fn linearize<L: LinearizationSink<Scalar = f64>>(
             &self,
             states: &S,
             sink: &mut L,
@@ -707,6 +689,7 @@ fn retraction_panic_discards_partially_staged_pools() {
         panic: Rc<Cell<bool>>,
     }
     impl Variable for Fragile {
+        type Scalar = f64;
         type Tangent = f64;
         const DOF: usize = 1;
         fn tangent_from_slice(delta: &[f64]) -> f64 {
@@ -722,13 +705,14 @@ fn retraction_panic_discards_partially_staged_pools() {
     }
     struct FragilePrior(StateKey<Fragile>);
     impl<S: StateStore<Fragile>> Factor<S> for FragilePrior {
+        type Scalar = f64;
         fn visit_variables(&self, mut visit: impl FnMut(BlockId)) {
             visit(self.0.block_id());
         }
         fn cost(&self, states: &S) -> Result<f64, EvaluationError> {
             Ok(0.5 * (states.get(self.0)?.value - 1.0).powi(2))
         }
-        fn linearize<L: LinearizationSink>(
+        fn linearize<L: LinearizationSink<Scalar = f64>>(
             &self,
             states: &S,
             sink: &mut L,
@@ -841,7 +825,7 @@ fn compare_cholesky_lsmr() {
     use fagra::{__private::LeastSquaresBackend, DenseNormalCholesky};
     use std::time::{Duration, Instant};
 
-    fn measure<B: LeastSquaresBackend>(
+    fn measure<B: LeastSquaresBackend<Scalar = f64>>(
         n: usize,
         anchor_stride: usize,
         backend: B,

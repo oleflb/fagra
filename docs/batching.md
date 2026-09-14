@@ -19,6 +19,12 @@ must report each payload's complete dependencies, including shared inputs.
 Its `cost` sums only the selected factors' costs, using the same objective as
 `Factor::cost`. Empty selections do no work.
 
+The model also declares `type Scalar`: `f64` in the SLAM example, or `R` for a
+generic model bounded by `fagra::Real`. Its cost returns that scalar and its
+linearization accepts `L: LinearizationSink<Scalar = Self::Scalar>`. Generic
+schemas register batches as `Batch<Model<R>, Payload<R>>`; the evaluator's
+scalar must match the graph. Payloads themselves need no scalar trait.
+
 ## Register and use a batch
 
 Using the types in [examples/slam.rs](../examples/slam.rs):

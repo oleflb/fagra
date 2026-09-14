@@ -1,6 +1,7 @@
 # Fagra
 
-A typed Rust factor-graph API with homogeneous storage and static dispatch.
+A typed Rust factor-graph API with homogeneous storage, static dispatch, and
+monomorphized `f32`/`f64` arithmetic.
 
 Define variables and constraints, declare their types, insert values, optimize,
 and read estimates through typed keys.
@@ -12,7 +13,8 @@ optimization work. `marginalize()` remains a `todo!()` stub.
 ## Quick start: one scalar and one prior
 
 This model minimizes `0.5 * (x - measurement)²`. Its solution is `x = measurement`.
-The complete, runnable source is [examples/scalar_prior.rs](examples/scalar_prior.rs):
+The walkthrough below uses `f64`. The complete, generic version in
+[examples/scalar_prior.rs](examples/scalar_prior.rs) runs in both precisions:
 
 ```sh
 cargo run --example scalar_prior
@@ -33,6 +35,7 @@ use faer_ext::nalgebra::{SMatrix, SVector};
 struct Scalar(f64);
 
 impl Variable for Scalar {
+    type Scalar = f64;
     type Tangent = f64;
     const DOF: usize = 1;
 
@@ -58,6 +61,8 @@ struct Prior {
 }
 
 impl<S: StateStore<Scalar>> Factor<S> for Prior {
+    type Scalar = f64;
+
     fn visit_variables(&self, mut visitor: impl FnMut(BlockId)) {
         visitor(self.variable.block_id());
     }
@@ -71,7 +76,7 @@ impl<S: StateStore<Scalar>> Factor<S> for Prior {
         Ok(cost)
     }
 
-    fn linearize<L: LinearizationSink>(
+    fn linearize<L: LinearizationSink<Scalar = f64>>(
         &self,
         states: &S,
         sink: &mut L,
@@ -130,6 +135,56 @@ is `4.5`; after one GN step, the estimate is `3.0` and cost is zero.
 Handles survive storage growth and compaction. Removed handles are rejected even
 after their slots are reused, and keys from another solver are rejected.
 
+## Scalar precision
+
+Each graph uses one scalar type throughout: tangent coordinates, residuals,
+Jacobians, cost accumulation, backend storage, steps, tolerances, and reports.
+`f32` and `f64` graphs can coexist in one binary; Rust monomorphizes both.
+
+For generic application types `Scalar<R>` and `Prior<R>`, declare:
+
+```rust
+fagra::states! { States<R> { scalars: Scalar<R> } }
+fagra::factors! { Factors<R> { priors: Prior<R> } }
+
+let mut single = Solver::<States<f32>, Factors<f32>>::new();
+let mut double = Solver::<States<f64>, Factors<f64>>::new();
+```
+
+The macros introduce `R: fagra::Real`, which combines faer's and nalgebra's
+real-number traits with `Copy`. Use the same bound on generic application types.
+Variables, factors, and batch models declare `type Scalar = R`; evaluators accept
+`L: LinearizationSink<Scalar = R>`. A variable's `tangent_from_slice` receives
+`&[R]`, and costs return `Result<R, EvaluationError>`. See the
+[generic scalar-prior example](examples/scalar_prior.rs) for a complete implementation.
+
+Both schemas and the selected backend must agree on precision. A Jacobian's
+coefficients must match its variable's scalar type. These are compile-time checks.
+Batch syntax also accepts generic types: `Batch<Model<R>, Observation<R>>`.
+Non-generic schema declarations use `f64`; existing implementations need
+`type Scalar = f64` and the corresponding sink bound.
+
+The retained default optimizer uses the schema's precision. To select LSMR:
+
+```rust
+let mut method = fagra::GaussNewton::new(fagra::Lsmr::<f32>::default());
+let report: fagra::OptimizeReport<f32> =
+    single.optimize_with(&mut method, &fagra::OptimizeOptions::<f32>::default())?;
+```
+
+Defaults preserve the existing `f64` tolerances and account for `f32` rounding.
+With `ε` denoting the scalar's machine epsilon:
+
+| Control | Default |
+| --- | --- |
+| Gradient tolerance | `max(1e-8, 8ε)` |
+| Step tolerance | `max(1e-10, ε)` |
+| Cost tolerance | `max(1e-12, ε)` |
+| LSMR relative tolerance | `max(1e-10, 128ε)` |
+
+These remain configurable. Gradient and step tolerances are absolute, so choose
+values appropriate to the model's units and scaling.
+
 ## Optimization controls and workspace reuse
 
 `optimize()` retains its default workspace. For explicit stopping controls or a
@@ -174,7 +229,7 @@ once per nonlinear iteration, and inner iterations reuse those coefficients.
 No global Jacobian or normal matrix is assembled. Storage is O(nnz + m + n),
 including copied block coefficients and reusable workspace. Products are sequential
 and unpreconditioned. Before constructing the optimizer, set `Lsmr::max_iterations`
-(default 1000) and `Lsmr::relative_tolerance` (default 1e-10) to tune the inner solve.
+(default 1000) and `Lsmr::relative_tolerance` (default `max(1e-10, 128ε)`) to tune the inner solve.
 Linear iteration exhaustion returns `LinearSolveFailed` before applying a step.
 Each optimization call rebuilds the cache, including after graph or model edits.
 

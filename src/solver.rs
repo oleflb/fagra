@@ -1,6 +1,6 @@
 use crate::{
-    BatchKey, BlockId, Factor, FactorBatch, FactorKey, GaussNewton, KeyError, OptimizeOptions,
-    OptimizeReport, SolverError, StateKey, StateStore, Variable,
+    BatchKey, BlockId, DenseNormalCholesky, Factor, FactorBatch, FactorKey, GaussNewton, KeyError,
+    OptimizeOptions, OptimizeReport, Real, SolverError, StateKey, StateStore, Variable,
     factors::{FactorSchema, FactorStore},
     optimization::Optimizer,
     states::{StateSchema, StateVisitor},
@@ -9,20 +9,23 @@ use crate::{
 
 /// A graph over a declared state schema `S` and factor schema `F`.
 ///
+/// Both schemas share one scalar type, inferred from `S::Scalar`. The retained
+/// optimizer, factor costs, stopping controls, and reports use that same precision.
+///
 /// Created from [`states!`](crate::states!) and [`factors!`](crate::factors!)
 /// declarations. Storage, checked graph insertion, factor costs, and removal work.
 /// Dense full-step Gauss–Newton is available through [`optimize`](Self::optimize).
 /// Marginalization remains an API stub; see the [crate status](crate#status).
-pub struct Solver<S, F> {
+pub struct Solver<S: StateSchema, F> {
     states: S,
     factors: F,
-    optimizer: GaussNewton,
+    optimizer: GaussNewton<DenseNormalCholesky<S::Scalar>>,
 }
 
 impl<S, F> Solver<S, F>
 where
     S: StateSchema,
-    F: FactorSchema<S>,
+    F: FactorSchema<S, Scalar = S::Scalar>,
 {
     /// Create an empty graph with the declared storage families.
     pub fn new() -> Self {
@@ -34,7 +37,7 @@ where
     }
 
     /// Insert an application-initialized variable into its registered pool.
-    pub fn add<T: Variable>(&mut self, value: T) -> StateKey<T>
+    pub fn add<T: Variable<Scalar = S::Scalar>>(&mut self, value: T) -> StateKey<T>
     where
         S: PoolAccess<StatePool<T>>,
     {
@@ -42,7 +45,7 @@ where
     }
 
     /// Borrow the current estimate; reject unknown, removed, or foreign keys.
-    pub fn get<T: Variable>(&self, key: StateKey<T>) -> Result<&T, KeyError>
+    pub fn get<T: Variable<Scalar = S::Scalar>>(&self, key: StateKey<T>) -> Result<&T, KeyError>
     where
         S: StateStore<T>,
     {
@@ -53,7 +56,7 @@ where
     /// On validation failure, storage is unchanged and the supplied factor is dropped.
     pub fn add_factor<T>(&mut self, factor: T) -> Result<FactorKey<T>, SolverError>
     where
-        T: Factor<S>,
+        T: Factor<S, Scalar = S::Scalar>,
         F: PoolAccess<FactorPool<T>>,
     {
         let mut dependencies = Dependencies {
@@ -71,7 +74,7 @@ where
     /// Empty batches remain reusable until the solver is dropped.
     pub fn add_batch<B>(&mut self, model: B) -> BatchKey<B>
     where
-        B: FactorBatch<S>,
+        B: FactorBatch<S, Scalar = S::Scalar>,
         F: PoolAccess<BatchPool<B, B::Factor>>,
     {
         self.factors.pool_mut().insert_batch(model)
@@ -85,7 +88,7 @@ where
         factor: B::Factor,
     ) -> Result<FactorKey<B::Factor>, SolverError>
     where
-        B: FactorBatch<S>,
+        B: FactorBatch<S, Scalar = S::Scalar>,
         F: PoolAccess<BatchPool<B, B::Factor>>,
     {
         let model = self.factors.pool().model(batch)?;
@@ -99,9 +102,9 @@ where
     }
 
     /// Evaluate one ordinary or batched factor's nonlinear cost without Jacobians.
-    pub fn factor_cost<T>(&self, factor: FactorKey<T>) -> Result<f64, SolverError>
+    pub fn factor_cost<T>(&self, factor: FactorKey<T>) -> Result<S::Scalar, SolverError>
     where
-        F: FactorStore<S, T>,
+        F: FactorStore<S, T, Scalar = S::Scalar>,
     {
         self.factors.factor_cost(&self.states, factor)
     }
@@ -109,7 +112,7 @@ where
     /// Discard one factor and its cached contribution, preserving sibling handles.
     pub fn remove_factor<T>(&mut self, factor: FactorKey<T>) -> Result<(), SolverError>
     where
-        F: FactorStore<S, T>,
+        F: FactorStore<S, T, Scalar = S::Scalar>,
     {
         Ok(self.factors.remove_factor(factor)?)
     }
@@ -123,7 +126,7 @@ where
     ///
     /// Failed trial evaluation discards all trial values, retaining estimates
     /// accepted by earlier iterations. Iteration exhaustion returns `NoConvergence`.
-    pub fn optimize(&mut self) -> Result<OptimizeReport, SolverError> {
+    pub fn optimize(&mut self) -> Result<OptimizeReport<S::Scalar>, SolverError> {
         self.optimizer.optimize(
             &mut self.states,
             &mut self.factors,
@@ -152,8 +155,8 @@ where
     pub fn optimize_with<O: Optimizer<S, F>>(
         &mut self,
         method: &mut O,
-        options: &OptimizeOptions,
-    ) -> Result<OptimizeReport, SolverError> {
+        options: &OptimizeOptions<S::Scalar>,
+    ) -> Result<OptimizeReport<S::Scalar>, SolverError> {
         method.optimize(&mut self.states, &mut self.factors, options)
     }
 
@@ -162,7 +165,10 @@ where
     /// Only absorbed factors are removed, including within batches. Marginal
     /// priors require no user registration. The variable's old handle becomes stale.
     /// Manifold prior coordinates and heterogeneous bulk selection remain undesigned.
-    pub fn marginalize<T: Variable>(&mut self, _variable: StateKey<T>) -> Result<(), SolverError>
+    pub fn marginalize<T: Variable<Scalar = S::Scalar>>(
+        &mut self,
+        _variable: StateKey<T>,
+    ) -> Result<(), SolverError>
     where
         S: PoolAccess<StatePool<T>>,
     {
@@ -173,7 +179,7 @@ where
 impl<S, F> Default for Solver<S, F>
 where
     S: StateSchema,
-    F: FactorSchema<S>,
+    F: FactorSchema<S, Scalar = S::Scalar>,
 {
     fn default() -> Self {
         Self::new()
@@ -195,10 +201,13 @@ impl<S: StateSchema> Dependencies<'_, S> {
             result: Option<Result<(), KeyError>>,
         }
 
-        impl StateVisitor for Resolve {
+        impl<R: Real> StateVisitor<R> for Resolve {
             type Error = std::convert::Infallible;
 
-            fn pool<T: Variable>(&mut self, pool: &mut StatePool<T>) -> Result<(), Self::Error> {
+            fn pool<T: Variable<Scalar = R>>(
+                &mut self,
+                pool: &mut StatePool<T>,
+            ) -> Result<(), Self::Error> {
                 if let Some(result) = pool.validate(self.id) {
                     self.result = Some(result);
                 }
@@ -220,6 +229,7 @@ mod tests {
 
     struct Value;
     impl Variable for Value {
+        type Scalar = f64;
         type Tangent = f64;
         const DOF: usize = 1;
         fn tangent_from_slice(delta: &[f64]) -> f64 {

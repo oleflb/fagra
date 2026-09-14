@@ -1,18 +1,18 @@
 use faer_ext::nalgebra::{Const, DMatrixView, Dyn, Matrix, SVector, Storage};
 
-use crate::{BlockId, EvaluationError, FactorId, StateKey, Variable};
+use crate::{BlockId, EvaluationError, FactorId, Real, StateKey, Variable};
 
 /// A borrowed Jacobian matrix and the variable it differentiates.
 ///
 /// Descriptors can form a stack array; the matrices remain in their original storage.
 /// Construction borrows the coefficients without allocating or copying. Arbitrary
 /// row and column strides are preserved, including those of noncontiguous views.
-pub struct JacobianBlock<'a> {
+pub struct JacobianBlock<'a, R: Real = f64> {
     variable: BlockId,
-    jacobian: DMatrixView<'a, f64, Dyn, Dyn>,
+    jacobian: DMatrixView<'a, R, Dyn, Dyn>,
 }
 
-impl<'a> JacobianBlock<'a> {
+impl<'a, R: Real> JacobianBlock<'a, R> {
     /// Borrow a fixed-dimension Jacobian from any compatible nalgebra storage.
     ///
     /// Accepts owned matrices and immutable or mutably backed views borrowed
@@ -27,7 +27,7 @@ impl<'a> JacobianBlock<'a> {
     /// ```no_run
     /// # use fagra::{JacobianBlock, StateKey, Variable};
     /// # use faer_ext::nalgebra::DMatrix;
-    /// # fn from_workspace<T: Variable>(key: StateKey<T>, workspace: &DMatrix<f64>) {
+    /// # fn from_workspace<T: Variable<Scalar = f64>>(key: StateKey<T>, workspace: &DMatrix<f64>) {
     /// // Requires T::DOF == 6 and a workspace large enough for the selected view.
     /// let view = workspace.fixed_view::<2, 6>(0, 0);
     /// let block = JacobianBlock::new(key, &view);
@@ -40,7 +40,7 @@ impl<'a> JacobianBlock<'a> {
     /// ```compile_fail
     /// use fagra::{FactorKey, JacobianBlock, Variable};
     /// use faer_ext::nalgebra::SMatrix;
-    /// fn wrong_kind<T: Variable>(key: FactorKey<T>, jacobian: &SMatrix<f64, 2, 3>) {
+    /// fn wrong_kind<T: Variable<Scalar = f64>>(key: FactorKey<T>, jacobian: &SMatrix<f64, 2, 3>) {
     ///     JacobianBlock::new(key, jacobian);
     /// }
     /// ```
@@ -48,17 +48,17 @@ impl<'a> JacobianBlock<'a> {
     /// ```compile_fail
     /// use fagra::{BatchKey, JacobianBlock, Variable};
     /// use faer_ext::nalgebra::SMatrix;
-    /// fn wrong_kind<T: Variable>(key: BatchKey<T>, jacobian: &SMatrix<f64, 2, 3>) {
+    /// fn wrong_kind<T: Variable<Scalar = f64>>(key: BatchKey<T>, jacobian: &SMatrix<f64, 2, 3>) {
     ///     JacobianBlock::new(key, jacobian);
     /// }
     /// ```
-    pub fn new<T, const R: usize, const C: usize, S>(
+    pub fn new<T, const ROWS: usize, const C: usize, S>(
         state: StateKey<T>,
-        jacobian: &'a Matrix<f64, Const<R>, Const<C>, S>,
+        jacobian: &'a Matrix<R, Const<ROWS>, Const<C>, S>,
     ) -> Self
     where
-        T: Variable,
-        S: Storage<f64, Const<R>, Const<C>>,
+        T: Variable<Scalar = R>,
+        S: Storage<R, Const<ROWS>, Const<C>>,
     {
         const {
             assert!(C == T::DOF, "Jacobian columns must match state DOF");
@@ -67,7 +67,7 @@ impl<'a> JacobianBlock<'a> {
         Self {
             variable: state.block_id(),
             // Zero skipped rows/columns preserves strides while erasing their types.
-            jacobian: jacobian.view_with_steps((0, 0), (R, C), (0, 0)),
+            jacobian: jacobian.view_with_steps((0, 0), (ROWS, C), (0, 0)),
         }
     }
 
@@ -92,7 +92,7 @@ impl<'a> JacobianBlock<'a> {
     /// ```
     ///
     /// `into_faer` panics if a stride cannot be represented as an `isize`.
-    pub fn jacobian(&self) -> DMatrixView<'a, f64, Dyn, Dyn> {
+    pub fn jacobian(&self) -> DMatrixView<'a, R, Dyn, Dyn> {
         self.jacobian
     }
 }
@@ -109,7 +109,7 @@ impl<'a> JacobianBlock<'a> {
 /// ```no_run
 /// # use fagra::{EvaluationError, JacobianBlock, LinearizationSink};
 /// # use faer_ext::nalgebra::SVector;
-/// # fn ordinary<L: LinearizationSink>(sink: &mut L, residual: &SVector<f64, 1>,
+/// # fn ordinary<L: LinearizationSink<Scalar = f64>>(sink: &mut L, residual: &SVector<f64, 1>,
 /// #     jacobians: &[JacobianBlock<'_>]) -> Result<(), EvaluationError> {
 /// sink.residual(residual, jacobians)?;
 /// # Ok(())
@@ -122,7 +122,7 @@ impl<'a> JacobianBlock<'a> {
 /// ```no_run
 /// # use fagra::{EvaluationError, FactorId, JacobianBlock, LinearizationSink};
 /// # use faer_ext::nalgebra::SVector;
-/// # fn batched<L: LinearizationSink>(sink: &mut L, id: FactorId,
+/// # fn batched<L: LinearizationSink<Scalar = f64>>(sink: &mut L, id: FactorId,
 /// #     residual: &SVector<f64, 1>, jacobians: &[JacobianBlock<'_>])
 /// #     -> Result<(), EvaluationError> {
 /// sink.factor(id, |out| out.residual(residual, jacobians))?;
@@ -134,6 +134,9 @@ impl<'a> JacobianBlock<'a> {
 /// Opening another scope in an ordinary factor would nest scopes; emitting
 /// directly from a batch would omit the factor identity. Both are invalid.
 pub trait LinearizationSink: Sized {
+    /// Scalar shared by all residuals and Jacobians emitted to this sink.
+    type Scalar: Real;
+
     /// Emit one factor's complete linearization within an identity scope.
     ///
     /// Scopes cannot nest. Ordinary factors receive an already scoped sink;
@@ -152,7 +155,7 @@ pub trait LinearizationSink: Sized {
     /// be retained after this call without copying into backend-owned storage.
     fn residual<const R: usize>(
         &mut self,
-        residual: &SVector<f64, R>,
-        jacobians: &[JacobianBlock<'_>],
+        residual: &SVector<Self::Scalar, R>,
+        jacobians: &[JacobianBlock<'_, Self::Scalar>],
     ) -> Result<(), EvaluationError>;
 }

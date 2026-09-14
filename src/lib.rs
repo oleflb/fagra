@@ -17,6 +17,16 @@
 //! This complete, tested example optimizes the scalar to its prior measurement.
 #![doc = concat!("```\n", include_str!("../examples/scalar_prior.rs"), "\n```")]
 //!
+//! # Scalar precision
+//! Both `f32` and `f64` are supported with monomorphized arithmetic. Declare
+//! `States<R>` and `Factors<R>` with the schema macros, then instantiate
+//! `Solver<States<f32>, Factors<f32>>` or `Solver<States<f64>, Factors<f64>>`.
+//! The macros supply the [`Real`] bound. Non-generic schemas use `f64`.
+//! Variables, factors, batches, and sinks declare an associated `Scalar`; schemas
+//! and backends must agree on it. Jacobians, costs, and step buffers use that
+//! precision throughout. [`OptimizeOptions`] and [`Lsmr`] defaults account for
+//! machine epsilon, and remain configurable for the model's scale.
+//!
 //! # Optimization
 //! [`Solver::optimize`] uses [`GaussNewton`] with [`DenseNormalCholesky`] and default
 //! stopping controls. [`Solver::optimize_with`] accepts a reusable method and
@@ -52,6 +62,7 @@ mod linearization;
 mod lsmr;
 mod normal;
 mod optimization;
+mod real;
 mod solver;
 mod states;
 mod storage;
@@ -64,6 +75,7 @@ pub use linearization::{JacobianBlock, LinearizationSink};
 pub use lsmr::Lsmr;
 pub use normal::DenseNormalCholesky;
 pub use optimization::{GaussNewton, OptimizeOptions, OptimizeReport, TerminationReason};
+pub use real::Real;
 pub use solver::Solver;
 pub use states::StateStore;
 pub use variable::Variable;
