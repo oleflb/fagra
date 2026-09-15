@@ -57,7 +57,8 @@ their models and remain reusable through the same `BatchKey` until the solver
 is dropped. Batch keys and all shared/local dependencies are validated before
 payload insertion; rejected payloads are dropped without publishing an entry.
 Dense GN optimization supports both ordinary factors and batches. The SLAM
-example's application geometry and marginalization are still placeholder code.
+example implements state Lie-group geometry; its factor geometry and
+marginalization are still placeholder code.
 
 Selections preserve payload/identity order even after compaction. `len()` counts
 remaining entries, and `as_slice()` returns those same remaining payloads as

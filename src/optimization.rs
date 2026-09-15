@@ -1,6 +1,6 @@
 use std::{collections::HashMap, convert::Infallible, ops::Range};
 
-use faer_ext::nalgebra::SVector;
+use faer_ext::nalgebra::{DimName, Matrix, Storage, U1, storage::IsContiguous};
 
 use crate::{
     BlockId, EvaluationError, Factor, FactorBatch, FactorId, JacobianBlock, LinearizationSink,
@@ -117,12 +117,14 @@ pub trait LeastSquaresBackend {
     fn clear(&mut self);
     /// Consume validated residuals and Jacobians. Columns correspond one-to-one
     /// with the Jacobian descriptors; repeated variable identities have been rejected.
-    fn accumulate<const R: usize>(
+    fn accumulate<Rows: DimName, S>(
         &mut self,
-        residual: &SVector<Self::Scalar, R>,
+        residual: &Matrix<Self::Scalar, Rows, U1, S>,
         jacobians: &[JacobianBlock<'_, Self::Scalar>],
         columns: &[usize],
-    ) -> Result<(), EvaluationError>;
+    ) -> Result<(), EvaluationError>
+    where
+        S: Storage<Self::Scalar, Rows, U1> + IsContiguous;
     /// Infinity norm of the unmodified linearized gradient, rejecting nonfinite values.
     /// Read before `solve`, which may overwrite gradient storage.
     fn gradient_norm(&self) -> Result<Self::Scalar, SolverError>;
@@ -202,11 +204,11 @@ impl<R: Real> StateVisitor<R> for Layout {
             self.blocks.push(Block {
                 id,
                 offset: self.dimension,
-                width: T::DOF,
+                width: T::Dim::DIM,
             });
             self.dimension = self
                 .dimension
-                .checked_add(T::DOF)
+                .checked_add(T::Dim::DIM)
                 .ok_or(EvaluationError::DimensionMismatch)?;
         }
         Ok(())
@@ -287,7 +289,7 @@ impl<R: Real> StateVisitor<R> for Stage<'_, R> {
         let count = pool
             .iter()
             .len()
-            .checked_mul(T::DOF)
+            .checked_mul(T::Dim::DIM)
             .ok_or(EvaluationError::DimensionMismatch)?;
         let end = self
             .position
@@ -383,11 +385,14 @@ impl<R: Real, B: LeastSquaresBackend<Scalar = R>> LinearizationSink for CheckedS
         result
     }
 
-    fn residual<const ROWS: usize>(
+    fn residual<Rows: DimName, S>(
         &mut self,
-        residual: &SVector<Self::Scalar, ROWS>,
+        residual: &Matrix<Self::Scalar, Rows, U1, S>,
         jacobians: &[JacobianBlock<'_, Self::Scalar>],
-    ) -> Result<(), EvaluationError> {
+    ) -> Result<(), EvaluationError>
+    where
+        S: Storage<Self::Scalar, Rows, U1> + IsContiguous,
+    {
         let result = (|| {
             let index = self.active.ok_or(EvaluationError::InvalidEmission)?;
             let dependencies =
@@ -429,7 +434,7 @@ impl<R: Real, B: LeastSquaresBackend<Scalar = R>> LinearizationSink for CheckedS
                 let block = &self.layout.blocks[block_index];
                 let matrix = jacobian.jacobian();
                 let (rs, cs) = matrix.strides();
-                if matrix.nrows() != ROWS
+                if matrix.nrows() != Rows::DIM
                     || matrix.ncols() != block.width
                     || rs > isize::MAX as usize
                     || cs > isize::MAX as usize

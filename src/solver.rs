@@ -227,27 +227,16 @@ impl<S: StateSchema> Dependencies<'_, S> {
 mod tests {
     use super::*;
 
-    struct Value;
-    impl Variable for Value {
-        type Scalar = f64;
-        type Tangent = f64;
-        const DOF: usize = 1;
-        fn tangent_from_slice(delta: &[f64]) -> f64 {
-            delta[0]
-        }
-        fn retract(&self, _: &f64) -> Self {
-            Self
-        }
-    }
+    type Value = crate::variable::test_support::Vector<1>;
     crate::states! { States { values: Value } }
 
     #[test]
     fn dependency_validation_distinguishes_stale_and_foreign_states() {
         let mut states = States::default();
-        let stale = states.pool_mut().insert(Value);
+        let stale = states.pool_mut().insert(Value::identity());
         states.pool_mut().remove(stale).unwrap();
-        let live = states.pool_mut().insert(Value);
-        let foreign = States::default().pool_mut().insert(Value);
+        let live = states.pool_mut().insert(Value::identity());
+        let foreign = States::default().pool_mut().insert(Value::identity());
         for (id, expected) in [
             (stale.block_id(), "stale"),
             (foreign.block_id(), "foreign"),

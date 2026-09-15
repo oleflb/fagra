@@ -1,15 +1,24 @@
 //! Advanced API walkthrough: standalone priors and independently removable reprojections.
 //! Start with `examples/scalar_prior.rs` for an ordinary one-variable factor.
 //!
-//! Compile with `cargo check --example slam`. Marginalization and
-//! application geometry below are placeholders, so this example is not runnable yet.
+//! Compile with `cargo check --example slam`. State Lie-group geometry is implemented;
+//! factor geometry and marginalization remain placeholders, so this is not runnable yet.
 
-use faer_ext::nalgebra::{SMatrix, SVector, UnitQuaternion, Vector2, Vector3};
+use faer_ext::nalgebra::{
+    Const, DefaultAllocator, SMatrix, SVector, UnitQuaternion, Vector2, Vector3,
+};
 use fagra::{
-    BlockId, EvaluationError, Factor, FactorBatch, FactorSelection, JacobianBlock,
-    LinearizationSink, Solver, SolverError, StateKey, StateStore, Variable,
+    BlockId, EvaluationError, Factor, FactorBatch, FactorSelection, Jacobian, JacobianBlock,
+    LinearizationSink, Solver, SolverError, StateKey, StateStore, Tangent, Variable,
 };
 
+/// SE(3) transform acting as `rotation * point + translation`.
+///
+/// Tangents are `[vx, vy, vz, wx, wy, wz]`: translation in the right/body frame
+/// followed by rotation in radians. The exponential couples the two parts.
+/// `log` uses the principal rotation branch (angle at most pi), with a branch
+/// discontinuity at pi. The inverse right Jacobian is singular at nonzero
+/// multiples of 2*pi rotation; callers must stay away from those singularities.
 pub struct Pose {
     pub rotation: UnitQuaternion<f64>,
     pub translation: Vector3<f64>,
@@ -17,18 +26,108 @@ pub struct Pose {
 
 impl Variable for Pose {
     type Scalar = f64;
-    type Tangent = SVector<f64, 6>;
-    const DOF: usize = 6;
+    type Dim = Const<6>;
+    type Allocator = DefaultAllocator;
 
-    fn tangent_from_slice(delta: &[f64]) -> Self::Tangent {
-        SVector::from_column_slice(delta)
+    fn identity() -> Self {
+        Self {
+            rotation: UnitQuaternion::identity(),
+            translation: Vector3::zeros(),
+        }
     }
 
-    fn retract(&self, _delta: &Self::Tangent) -> Self {
-        todo!("Application geometry: choose a consistent pose perturbation convention")
+    fn compose(&self, other: &Self) -> Self {
+        Self {
+            rotation: self.rotation * other.rotation,
+            translation: self.rotation * other.translation + self.translation,
+        }
+    }
+
+    fn inverse(&self) -> Self {
+        let rotation = self.rotation.inverse();
+        Self {
+            rotation,
+            translation: -(rotation * self.translation),
+        }
+    }
+
+    fn exp(delta: &Tangent<Self>) -> Self {
+        let omega = delta.fixed_rows::<3>(3).into_owned();
+        let mut generator = SMatrix::<f64, 4, 4>::zeros();
+        generator
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&omega.cross_matrix());
+        generator
+            .fixed_view_mut::<3, 1>(0, 3)
+            .copy_from(&delta.fixed_rows::<3>(0));
+        Self {
+            rotation: UnitQuaternion::from_scaled_axis(omega),
+            translation: generator.exp().fixed_view::<3, 1>(0, 3).into_owned(),
+        }
+    }
+
+    fn log(&self) -> Tangent<Self> {
+        let mut delta = Tangent::<Self>::zeros();
+        delta
+            .fixed_rows_mut::<3>(3)
+            .copy_from(&self.rotation.scaled_axis());
+        // t = Jl(omega) * v. Its inverse is regular on the principal branch.
+        let jl = Self::right_jacobian(&(-delta))
+            .fixed_view::<3, 3>(0, 0)
+            .into_owned();
+        let v = jl
+            .lu()
+            .solve(&self.translation)
+            .expect("principal SO(3) Jacobian is invertible");
+        delta.fixed_rows_mut::<3>(0).copy_from(&v);
+        delta
+    }
+
+    fn adjoint(&self) -> Jacobian<Self> {
+        let rotation = self.rotation.to_rotation_matrix();
+        let mut adjoint = Jacobian::<Self>::zeros();
+        adjoint
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(rotation.matrix());
+        adjoint
+            .fixed_view_mut::<3, 3>(3, 3)
+            .copy_from(rotation.matrix());
+        adjoint
+            .fixed_view_mut::<3, 3>(0, 3)
+            .copy_from(&(self.translation.cross_matrix() * rotation.matrix()));
+        adjoint
+    }
+
+    fn right_jacobian(delta: &Tangent<Self>) -> Jacobian<Self> {
+        let omega = delta.fixed_rows::<3>(3).into_owned().cross_matrix();
+        let velocity = delta.fixed_rows::<3>(0).into_owned().cross_matrix();
+        // Jr(delta) = integral_0^1 exp(-s * ad(delta)) ds. It is the top-right
+        // block of exp([ -ad(delta), I; 0, 0 ]), including at delta = 0.
+        // ponytail: a 12x12 exponential favors clarity; use closed-form SE(3)
+        // Jacobians if profiling shows geometry dominates frame evaluation.
+        let mut generator = SMatrix::<f64, 12, 12>::zeros();
+        generator.fixed_view_mut::<3, 3>(0, 0).copy_from(&(-omega));
+        generator.fixed_view_mut::<3, 3>(3, 3).copy_from(&(-omega));
+        generator
+            .fixed_view_mut::<3, 3>(0, 3)
+            .copy_from(&(-velocity));
+        generator
+            .fixed_view_mut::<6, 6>(0, 6)
+            .copy_from(&Jacobian::<Self>::identity());
+        generator.exp().fixed_view::<6, 6>(0, 6).into_owned()
+    }
+
+    fn right_jacobian_inverse(delta: &Tangent<Self>) -> Jacobian<Self> {
+        Self::right_jacobian(delta)
+            .try_inverse()
+            .expect("singular SE(3) right Jacobian")
     }
 }
 
+/// Additive coordinates `[fx, fy, cx, cy]`, all measured in pixels.
+///
+/// The group is all of R^4; its zero identity is not a usable camera calibration.
+/// Projection factors must validate the calibration required by their model.
 pub struct CameraIntrinsics {
     pub fx: f64,
     pub fy: f64,
@@ -38,36 +137,85 @@ pub struct CameraIntrinsics {
 
 impl Variable for CameraIntrinsics {
     type Scalar = f64;
-    type Tangent = SVector<f64, 4>;
-    const DOF: usize = 4;
+    type Dim = Const<4>;
+    type Allocator = DefaultAllocator;
 
-    fn tangent_from_slice(delta: &[f64]) -> Self::Tangent {
-        SVector::from_column_slice(delta)
+    fn identity() -> Self {
+        Self::exp(&Tangent::<Self>::zeros())
     }
 
-    fn retract(&self, delta: &Self::Tangent) -> Self {
+    fn compose(&self, other: &Self) -> Self {
+        Self::exp(&(self.log() + other.log()))
+    }
+
+    fn inverse(&self) -> Self {
+        Self::exp(&(-self.log()))
+    }
+
+    fn exp(delta: &Tangent<Self>) -> Self {
         Self {
-            fx: self.fx + delta[0],
-            fy: self.fy + delta[1],
-            cx: self.cx + delta[2],
-            cy: self.cy + delta[3],
+            fx: delta[0],
+            fy: delta[1],
+            cx: delta[2],
+            cy: delta[3],
         }
+    }
+
+    fn log(&self) -> Tangent<Self> {
+        SVector::<f64, 4>::new(self.fx, self.fy, self.cx, self.cy)
+    }
+
+    fn adjoint(&self) -> Jacobian<Self> {
+        SMatrix::identity()
+    }
+
+    fn right_jacobian(_: &Tangent<Self>) -> Jacobian<Self> {
+        SMatrix::identity()
+    }
+
+    fn right_jacobian_inverse(_: &Tangent<Self>) -> Jacobian<Self> {
+        SMatrix::identity()
     }
 }
 
+/// Additive world-space coordinates `[x, y, z]`, in the pose's translation units.
 pub struct Landmark(pub Vector3<f64>);
 
 impl Variable for Landmark {
     type Scalar = f64;
-    type Tangent = Vector3<f64>;
-    const DOF: usize = 3;
+    type Dim = Const<3>;
+    type Allocator = DefaultAllocator;
 
-    fn tangent_from_slice(delta: &[f64]) -> Self::Tangent {
-        Vector3::from_column_slice(delta)
+    fn identity() -> Self {
+        Self(Vector3::zeros())
     }
 
-    fn retract(&self, delta: &Self::Tangent) -> Self {
-        Self(self.0 + delta)
+    fn compose(&self, other: &Self) -> Self {
+        Self(self.0 + other.0)
+    }
+
+    fn inverse(&self) -> Self {
+        Self(-self.0)
+    }
+
+    fn exp(delta: &Tangent<Self>) -> Self {
+        Self(*delta)
+    }
+
+    fn log(&self) -> Tangent<Self> {
+        self.0
+    }
+
+    fn adjoint(&self) -> Jacobian<Self> {
+        SMatrix::identity()
+    }
+
+    fn right_jacobian(_: &Tangent<Self>) -> Jacobian<Self> {
+        SMatrix::identity()
+    }
+
+    fn right_jacobian_inverse(_: &Tangent<Self>) -> Jacobian<Self> {
+        SMatrix::identity()
     }
 }
 

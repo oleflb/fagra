@@ -2,12 +2,12 @@ use std::{cell::Cell, rc::Rc};
 
 use faer_ext::{
     IntoFaer,
-    nalgebra::{SMatrix, SVector},
+    nalgebra::{Const, DefaultAllocator, SMatrix, SVector},
 };
 use fagra::{
     __private::LeastSquaresBackend, BlockId, DenseNormalCholesky, EvaluationError, Factor,
-    FactorBatch, FactorSelection, GaussNewton, JacobianBlock, LinearizationSink, Lsmr,
-    OptimizeOptions, OptimizeReport, Real, Solver, SolverError, StateKey, StateStore,
+    FactorBatch, FactorSelection, GaussNewton, Jacobian, JacobianBlock, LinearizationSink, Lsmr,
+    OptimizeOptions, OptimizeReport, Real, Solver, SolverError, StateKey, StateStore, Tangent,
     TerminationReason, Variable,
 };
 
@@ -42,15 +42,32 @@ impl<R: Real, S: StateStore<Scalar<R>>> Factor<S> for Square<R> {
 struct Pair<R: Real>(SVector<R, 2>);
 impl<R: Real> Variable for Pair<R> {
     type Scalar = R;
-    type Tangent = SVector<R, 2>;
-    const DOF: usize = 2;
+    type Dim = Const<2>;
+    type Allocator = DefaultAllocator;
 
-    fn tangent_from_slice(delta: &[R]) -> Self::Tangent {
-        SVector::from_column_slice(delta)
+    fn identity() -> Self {
+        Self(SVector::zeros())
     }
-
-    fn retract(&self, delta: &Self::Tangent) -> Self {
-        Self(self.0 + delta)
+    fn compose(&self, other: &Self) -> Self {
+        Self(self.0 + other.0)
+    }
+    fn inverse(&self) -> Self {
+        Self(-self.0)
+    }
+    fn exp(delta: &Tangent<Self>) -> Self {
+        Self(*delta)
+    }
+    fn log(&self) -> Tangent<Self> {
+        self.0
+    }
+    fn adjoint(&self) -> Jacobian<Self> {
+        SMatrix::identity()
+    }
+    fn right_jacobian(_: &Tangent<Self>) -> Jacobian<Self> {
+        SMatrix::identity()
+    }
+    fn right_jacobian_inverse(_: &Tangent<Self>) -> Jacobian<Self> {
+        SMatrix::identity()
     }
 }
 

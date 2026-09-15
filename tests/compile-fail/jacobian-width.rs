@@ -1,42 +1,29 @@
 //@ revisions: valid invalid
 //@ edition: 2024
-//@ compile-flags: --emit=link
 //@[valid] check-pass
-//@[invalid] error-in-other-file: Jacobian columns must match state DOF
-//@[invalid] error-in-other-file: Jacobian columns must match state DOF
-//@[invalid] error-in-other-file: Jacobian columns must match state DOF
-//@[invalid] error-in-other-file: Jacobian columns must match state DOF
-//@[invalid] error-in-other-file: Jacobian columns must match state DOF
 
-// One const-evaluation error per storage type: owned, views, and mutable views,
-// with contiguous or dynamic row strides.
+// Column dimensions are checked during type checking. Valid dimensions support
+// owned matrices and views with contiguous or dynamic row strides.
 
 use faer_ext::nalgebra::{Const, DMatrix, DMatrixView, Dyn, Matrix, SMatrix, Storage};
-use fagra::{JacobianBlock, StateKey, Variable};
+use fagra::{JacobianBlock, StateKey};
 
-struct Pose;
-impl Variable for Pose {
-    type Scalar = f64;
-    type Tangent = [f64; 6];
-    const DOF: usize = 6;
-    fn tangent_from_slice(_: &[f64]) -> Self::Tangent {
-        todo!()
-    }
-    fn retract(&self, _: &Self::Tangent) -> Self {
-        todo!()
-    }
-}
+#[allow(dead_code)]
+#[path = "../../examples/slam.rs"]
+mod slam;
+use slam::Pose;
 
 const C: usize = if cfg!(invalid) { 3 } else { 6 };
 
 fn check_storage<'a, S: Storage<f64, Const<2>, Const<C>>>(
     _: &'a Matrix<f64, Const<2>, Const<C>, S>,
 ) {
-    // Force monomorphization: metadata-only checks can miss the const assertion.
     let constructor: fn(
         StateKey<Pose>,
         &'a Matrix<f64, Const<2>, Const<C>, S>,
-    ) -> JacobianBlock<'a> = JacobianBlock::new::<Pose, 2, C, S>;
+    ) -> JacobianBlock<'a> = JacobianBlock::new::<Pose, Const<2>, S>;
+    //~[invalid]^ ERROR: trait bound
+    //~[invalid]| ERROR: mismatched types
     std::hint::black_box(constructor);
 }
 

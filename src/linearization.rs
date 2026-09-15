@@ -1,4 +1,4 @@
-use faer_ext::nalgebra::{Const, DMatrixView, Dyn, Matrix, SVector, Storage};
+use faer_ext::nalgebra::{DMatrixView, DimName, Dyn, Matrix, Storage, U1, storage::IsContiguous};
 
 use crate::{BlockId, EvaluationError, FactorId, Real, StateKey, Variable};
 
@@ -17,8 +17,8 @@ impl<'a, R: Real> JacobianBlock<'a, R> {
     ///
     /// Accepts owned matrices and immutable or mutably backed views borrowed
     /// immutably. The matrix or view passed here must outlive the descriptor.
-    /// Dimensions stay known at compile time; a column-count mismatch with
-    /// [`Variable::DOF`] fails during monomorphization, not necessarily `cargo check`.
+    /// Dimensions stay known at compile time; the column dimension must be the
+    /// variable's [`Variable::Dim`]. A mismatch is a type error, even in `cargo check`.
     /// The sink checks that the row count matches the emitted residual.
     /// The constructor obtains the numerical identity from [`StateKey::block_id`].
     ///
@@ -26,9 +26,9 @@ impl<'a, R: Real> JacobianBlock<'a, R> {
     ///
     /// ```no_run
     /// # use fagra::{JacobianBlock, StateKey, Variable};
-    /// # use faer_ext::nalgebra::DMatrix;
-    /// # fn from_workspace<T: Variable<Scalar = f64>>(key: StateKey<T>, workspace: &DMatrix<f64>) {
-    /// // Requires T::DOF == 6 and a workspace large enough for the selected view.
+    /// # use faer_ext::nalgebra::{Const, DMatrix};
+    /// # fn from_workspace<T: Variable<Scalar = f64, Dim = Const<6>>>(key: StateKey<T>, workspace: &DMatrix<f64>) {
+    /// // Requires a workspace large enough for the selected view.
     /// let view = workspace.fixed_view::<2, 6>(0, 0);
     /// let block = JacobianBlock::new(key, &view);
     /// # let _ = block;
@@ -39,35 +39,31 @@ impl<'a, R: Real> JacobianBlock<'a, R> {
     ///
     /// ```compile_fail
     /// use fagra::{FactorKey, JacobianBlock, Variable};
-    /// use faer_ext::nalgebra::SMatrix;
-    /// fn wrong_kind<T: Variable<Scalar = f64>>(key: FactorKey<T>, jacobian: &SMatrix<f64, 2, 3>) {
+    /// use faer_ext::nalgebra::{Const, SMatrix};
+    /// fn wrong_kind<T: Variable<Scalar = f64, Dim = Const<3>>>(key: FactorKey<T>, jacobian: &SMatrix<f64, 2, 3>) {
     ///     JacobianBlock::new(key, jacobian);
     /// }
     /// ```
     ///
     /// ```compile_fail
     /// use fagra::{BatchKey, JacobianBlock, Variable};
-    /// use faer_ext::nalgebra::SMatrix;
-    /// fn wrong_kind<T: Variable<Scalar = f64>>(key: BatchKey<T>, jacobian: &SMatrix<f64, 2, 3>) {
+    /// use faer_ext::nalgebra::{Const, SMatrix};
+    /// fn wrong_kind<T: Variable<Scalar = f64, Dim = Const<3>>>(key: BatchKey<T>, jacobian: &SMatrix<f64, 2, 3>) {
     ///     JacobianBlock::new(key, jacobian);
     /// }
     /// ```
-    pub fn new<T, const ROWS: usize, const C: usize, S>(
+    pub fn new<T, Rows: DimName, S>(
         state: StateKey<T>,
-        jacobian: &'a Matrix<R, Const<ROWS>, Const<C>, S>,
+        jacobian: &'a Matrix<R, Rows, T::Dim, S>,
     ) -> Self
     where
         T: Variable<Scalar = R>,
-        S: Storage<R, Const<ROWS>, Const<C>>,
+        S: Storage<R, Rows, T::Dim>,
     {
-        const {
-            assert!(C == T::DOF, "Jacobian columns must match state DOF");
-        }
-
         Self {
             variable: state.block_id(),
             // Zero skipped rows/columns preserves strides while erasing their types.
-            jacobian: jacobian.view_with_steps((0, 0), (ROWS, C), (0, 0)),
+            jacobian: jacobian.view_with_steps((0, 0), (Rows::DIM, T::Dim::DIM), (0, 0)),
         }
     }
 
@@ -153,9 +149,14 @@ pub trait LinearizationSink: Sized {
     /// or nonfinite values. Repeated variable IDs must be combined correctly or
     /// rejected, never treated as independent variables. Borrowed data may not
     /// be retained after this call without copying into backend-owned storage.
-    fn residual<const R: usize>(
+    /// The row dimension may be a concrete `Const<N>` or a variable's associated
+    /// dimension, allowing generic factors to emit [`Tangent<T>`](crate::Tangent) residuals.
+    /// Residual storage is borrowed and must be contiguous; no allocator is needed.
+    fn residual<Rows: DimName, S>(
         &mut self,
-        residual: &SVector<Self::Scalar, R>,
+        residual: &Matrix<Self::Scalar, Rows, U1, S>,
         jacobians: &[JacobianBlock<'_, Self::Scalar>],
-    ) -> Result<(), EvaluationError>;
+    ) -> Result<(), EvaluationError>
+    where
+        S: Storage<Self::Scalar, Rows, U1> + IsContiguous;
 }

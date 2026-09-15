@@ -65,14 +65,21 @@ pub trait StateVisitor<R: Real = f64> {
 /// without a parameter use `f64`. Empty generic schemas are supported.
 ///
 /// ```no_run
-/// use fagra::{states, Variable};
+/// use fagra::{states, Variable, Tangent, Jacobian};
+/// # use faer_ext::nalgebra::{Const, DefaultAllocator};
 /// # struct Pose;
 /// # impl Variable for Pose {
 /// #     type Scalar = f64;
-/// #     type Tangent = [f64; 6];
-/// #     const DOF: usize = 6;
-/// #     fn tangent_from_slice(_: &[f64]) -> Self::Tangent { todo!() }
-/// #     fn retract(&self, _: &Self::Tangent) -> Self { todo!() }
+/// #     type Dim = Const<6>;
+/// #     type Allocator = DefaultAllocator;
+/// #     fn identity() -> Self { todo!() }
+/// #     fn compose(&self, _: &Self) -> Self { todo!() }
+/// #     fn inverse(&self) -> Self { todo!() }
+/// #     fn exp(_: &Tangent<Self>) -> Self { todo!() }
+/// #     fn log(&self) -> Tangent<Self> { todo!() }
+/// #     fn adjoint(&self) -> Jacobian<Self> { todo!() }
+/// #     fn right_jacobian(_: &Tangent<Self>) -> Jacobian<Self> { todo!() }
+/// #     fn right_jacobian_inverse(_: &Tangent<Self>) -> Jacobian<Self> { todo!() }
 /// # }
 /// states! {
 ///     /// Variables used by this application.

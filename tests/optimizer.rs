@@ -4,11 +4,11 @@ use std::{
     rc::Rc,
 };
 
-use faer_ext::nalgebra::{SMatrix, SVector};
+use faer_ext::nalgebra::{Const, DefaultAllocator, SMatrix, SVector};
 use fagra::{
     BlockId, EvaluationError, Factor, FactorBatch, FactorId, FactorSelection, GaussNewton,
-    JacobianBlock, LinearizationSink, Lsmr, OptimizeOptions, Solver, SolverError, StateKey,
-    StateStore, TerminationReason, Variable,
+    Jacobian, JacobianBlock, LinearizationSink, Lsmr, OptimizeOptions, Solver, SolverError,
+    StateKey, StateStore, Tangent, TerminationReason, Variable,
 };
 
 #[path = "optimizer/precision.rs"]
@@ -128,13 +128,31 @@ impl<S: StateStore<Scalar>> Factor<S> for Difference {
 struct Pair([f64; 2]);
 impl Variable for Pair {
     type Scalar = f64;
-    type Tangent = [f64; 2];
-    const DOF: usize = 2;
-    fn tangent_from_slice(delta: &[f64]) -> [f64; 2] {
-        [delta[0], delta[1]]
+    type Dim = Const<2>;
+    type Allocator = DefaultAllocator;
+    fn identity() -> Self {
+        Self([0.0; 2])
     }
-    fn retract(&self, delta: &[f64; 2]) -> Self {
-        Self([self.0[0] + delta[0], self.0[1] + delta[1]])
+    fn compose(&self, other: &Self) -> Self {
+        Self::exp(&(self.log() + other.log()))
+    }
+    fn inverse(&self) -> Self {
+        Self::exp(&(-self.log()))
+    }
+    fn exp(delta: &Tangent<Self>) -> Self {
+        Self([delta[0], delta[1]])
+    }
+    fn log(&self) -> Tangent<Self> {
+        SVector::from_column_slice(&self.0)
+    }
+    fn adjoint(&self) -> Jacobian<Self> {
+        SMatrix::identity()
+    }
+    fn right_jacobian(_: &Tangent<Self>) -> Jacobian<Self> {
+        SMatrix::identity()
+    }
+    fn right_jacobian_inverse(_: &Tangent<Self>) -> Jacobian<Self> {
+        SMatrix::identity()
     }
 }
 
@@ -690,15 +708,48 @@ fn retraction_panic_discards_partially_staged_pools() {
     }
     impl Variable for Fragile {
         type Scalar = f64;
-        type Tangent = f64;
-        const DOF: usize = 1;
-        fn tangent_from_slice(delta: &[f64]) -> f64 {
-            delta[0]
+        type Dim = Const<1>;
+        type Allocator = DefaultAllocator;
+        fn identity() -> Self {
+            Self {
+                value: 0.0,
+                panic: Rc::new(Cell::new(false)),
+            }
         }
-        fn retract(&self, delta: &f64) -> Self {
+        fn compose(&self, other: &Self) -> Self {
+            Self {
+                value: self.value + other.value,
+                panic: self.panic.clone(),
+            }
+        }
+        fn inverse(&self) -> Self {
+            Self {
+                value: -self.value,
+                panic: self.panic.clone(),
+            }
+        }
+        fn exp(delta: &Tangent<Self>) -> Self {
+            Self {
+                value: delta[0],
+                ..Self::identity()
+            }
+        }
+        fn log(&self) -> Tangent<Self> {
+            SVector::<f64, 1>::new(self.value)
+        }
+        fn adjoint(&self) -> Jacobian<Self> {
+            SMatrix::identity()
+        }
+        fn right_jacobian(_: &Tangent<Self>) -> Jacobian<Self> {
+            SMatrix::identity()
+        }
+        fn right_jacobian_inverse(_: &Tangent<Self>) -> Jacobian<Self> {
+            SMatrix::identity()
+        }
+        fn retract(&self, delta: &Tangent<Self>) -> Self {
             assert!(!self.panic.get(), "test retraction panic");
             Self {
-                value: self.value + delta,
+                value: self.value + delta[0],
                 panic: self.panic.clone(),
             }
         }

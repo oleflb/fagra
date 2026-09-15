@@ -9,7 +9,10 @@ use faer::{
         },
     },
 };
-use faer_ext::{IntoFaer, nalgebra::SVector};
+use faer_ext::{
+    IntoFaer,
+    nalgebra::{DimName, Matrix, Storage, U1, storage::IsContiguous},
+};
 
 use crate::{
     EvaluationError, JacobianBlock, Real, SolverError,
@@ -79,13 +82,16 @@ impl<R: Real> LeastSquaresBackend for DenseNormalCholesky<R> {
         self.rhs.fill(R::zero());
     }
 
-    fn accumulate<const ROWS: usize>(
+    fn accumulate<Rows: DimName, S>(
         &mut self,
-        residual: &SVector<R, ROWS>,
+        residual: &Matrix<R, Rows, U1, S>,
         jacobians: &[JacobianBlock<'_, R>],
         columns: &[usize],
-    ) -> Result<(), EvaluationError> {
-        let residual = MatRef::from_column_major_slice(residual.as_slice(), ROWS, 1);
+    ) -> Result<(), EvaluationError>
+    where
+        S: Storage<R, Rows, U1> + IsContiguous,
+    {
+        let residual = MatRef::from_column_major_slice(residual.as_slice(), Rows::DIM, 1);
         for (i, block) in jacobians.iter().enumerate() {
             let left: MatRef<'_, R> = block.jacobian().into_faer();
             let width = left.ncols();
@@ -184,25 +190,14 @@ impl<R: Real> LeastSquaresBackend for DenseNormalCholesky<R> {
 mod tests {
     use super::*;
     use crate::{Variable, storage::StatePool};
-    use faer_ext::nalgebra::SMatrix;
+    use faer_ext::nalgebra::{SMatrix, SVector};
 
-    struct Pair;
-    impl Variable for Pair {
-        type Scalar = f64;
-        type Tangent = [f64; 2];
-        const DOF: usize = 2;
-        fn tangent_from_slice(delta: &[f64]) -> Self::Tangent {
-            [delta[0], delta[1]]
-        }
-        fn retract(&self, _: &Self::Tangent) -> Self {
-            Self
-        }
-    }
+    type Pair = crate::variable::test_support::Vector<2>;
 
     #[test]
     fn lower_triangle_and_rhs_are_assembled_and_solved_in_place() {
         let mut states = StatePool::default();
-        let key = states.insert(Pair);
+        let key = states.insert(Pair::identity());
         let jacobian = SMatrix::<f64, 2, 2>::from_row_slice(&[1.0, 2.0, 3.0, 4.0]);
         let residual = SVector::<f64, 2>::new(-5.0, -11.0);
         let mut backend = DenseNormalCholesky::default();

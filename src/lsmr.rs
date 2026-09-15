@@ -3,7 +3,7 @@ use faer::{
     dyn_stack::{MemBuffer, MemStack, StackReq},
     matrix_free::{BiLinOp, IdentityPrecond, InitialGuessStatus, LinOp, lsmr},
 };
-use faer_ext::nalgebra::SVector;
+use faer_ext::nalgebra::{DimName, Matrix, Storage, U1, storage::IsContiguous};
 
 use crate::{
     EvaluationError, JacobianBlock, Real, SolverError,
@@ -162,15 +162,18 @@ impl<R: Real> LeastSquaresBackend for Lsmr<R> {
         self.gradient.fill(R::zero());
     }
 
-    fn accumulate<const ROWS: usize>(
+    fn accumulate<Rows: DimName, S>(
         &mut self,
-        residual: &SVector<R, ROWS>,
+        residual: &Matrix<R, Rows, U1, S>,
         jacobians: &[JacobianBlock<'_, R>],
         columns: &[usize],
-    ) -> Result<(), EvaluationError> {
+    ) -> Result<(), EvaluationError>
+    where
+        S: Storage<R, Rows, U1> + IsContiguous,
+    {
         let row = self.jacobian.rows;
         self.jacobian.rows = row
-            .checked_add(ROWS)
+            .checked_add(Rows::DIM)
             .ok_or(EvaluationError::DimensionMismatch)?;
         self.rhs.extend(residual.iter().map(|&r| -r));
         for (block, &col) in jacobians.iter().zip(columns) {
@@ -178,14 +181,14 @@ impl<R: Real> LeastSquaresBackend for Lsmr<R> {
             self.jacobian.blocks.push(Block {
                 row,
                 col,
-                rows: ROWS,
+                rows: Rows::DIM,
                 cols: matrix.ncols(),
                 start: self.jacobian.values.len(),
             });
             // Pack explicitly: emitted views may have arbitrary strides.
             for j in 0..matrix.ncols() {
                 let mut gradient = R::zero();
-                for i in 0..ROWS {
+                for i in 0..Rows::DIM {
                     let value = matrix[(i, j)];
                     self.jacobian.values.push(value);
                     gradient += value * residual[i];
@@ -247,18 +250,9 @@ mod tests {
     use super::*;
     use crate::{DenseNormalCholesky, Variable, storage::StatePool};
     use faer::Mat;
-    use faer_ext::nalgebra::SMatrix;
+    use faer_ext::nalgebra::{SMatrix, SVector};
 
-    struct Pair;
-    impl Variable for Pair {
-        type Scalar = f64;
-        type Tangent = ();
-        const DOF: usize = 2;
-        fn tangent_from_slice(_: &[f64]) {}
-        fn retract(&self, _: &()) -> Self {
-            Self
-        }
-    }
+    type Pair = crate::variable::test_support::Vector<2>;
 
     #[test]
     fn workspace_handles_large_coordinate_vectors() {
@@ -269,7 +263,7 @@ mod tests {
             solver.prepare(n).unwrap();
             solver.clear();
             for col in (0..n).step_by(2) {
-                let key = states.insert(Pair);
+                let key = states.insert(Pair::identity());
                 let residual = SVector::<f64, 2>::new(-(col as f64), -(col as f64 + 1.0));
                 solver
                     .accumulate(&residual, &[JacobianBlock::new(key, &jacobian)], &[col])
@@ -284,8 +278,8 @@ mod tests {
     #[test]
     fn cached_products_and_rectangular_solve_match_dense() {
         let mut states = StatePool::default();
-        let a = states.insert(Pair);
-        let b = states.insert(Pair);
+        let a = states.insert(Pair::identity());
+        let b = states.insert(Pair::identity());
         let mut solver = Lsmr::default();
         let mut dense = DenseNormalCholesky::default();
         solver.prepare(0).unwrap();

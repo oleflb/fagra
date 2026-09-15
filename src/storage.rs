@@ -1,3 +1,5 @@
+use faer_ext::nalgebra::DimName;
+
 use crate::{
     BatchKey, BlockId, EvaluationError, Factor, FactorBatch, FactorId, FactorKey, FactorSelection,
     KeyError, Real, SolverError, StateKey, Variable,
@@ -108,15 +110,15 @@ impl<T: Variable> StatePool<T> {
             .entries
             .values
             .len()
-            .checked_mul(T::DOF)
+            .checked_mul(T::Dim::DIM)
             .ok_or(EvaluationError::DimensionMismatch)?;
         if delta.len() != expected {
             return Err(EvaluationError::DimensionMismatch);
         }
         self.reject_trial();
         for (index, value) in self.entries.values.iter().enumerate() {
-            let start = index * T::DOF;
-            let tangent = T::tangent_from_slice(&delta[start..start + T::DOF]);
+            let start = index * T::Dim::DIM;
+            let tangent = T::tangent_from_slice(&delta[start..start + T::Dim::DIM]);
             self.trial.push(value.retract(&tangent));
         }
         self.trial_active = true;

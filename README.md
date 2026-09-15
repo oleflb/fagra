@@ -22,32 +22,48 @@ cargo run --example scalar_prior
 
 ### 1. Define the variable
 
-`Variable` describes the optimization coordinates and how to apply an increment.
-A scalar has one coordinate and uses addition for retraction.
+`Variable` describes a Lie group and its geometry derivatives. A scalar is the
+additive group: composition is addition, inverse is negation, and its geometry
+Jacobians are identity. The default retraction applies the increment on the right.
 
 ```rust
 use fagra::{
-    BlockId, EvaluationError, Factor, JacobianBlock, LinearizationSink,
-    Solver, SolverError, StateKey, StateStore, Variable,
+    BlockId, EvaluationError, Factor, Jacobian, JacobianBlock, LinearizationSink,
+    Solver, SolverError, StateKey, StateStore, Tangent, Variable,
 };
-use faer_ext::nalgebra::{SMatrix, SVector};
+use faer_ext::nalgebra::{Const, DefaultAllocator, SMatrix, SVector};
 
 struct Scalar(f64);
 
 impl Variable for Scalar {
     type Scalar = f64;
-    type Tangent = f64;
-    const DOF: usize = 1;
+    type Dim = Const<1>;
+    type Allocator = DefaultAllocator;
 
-    fn tangent_from_slice(delta: &[f64]) -> f64 {
-        delta[0] // The solver guarantees exactly DOF coordinates.
+    fn identity() -> Self { Self(0.0) }
+    fn compose(&self, other: &Self) -> Self { Self(self.0 + other.0) }
+    fn inverse(&self) -> Self { Self(-self.0) }
+    fn exp(delta: &Tangent<Self>) -> Self { Self(delta[0]) }
+    fn log(&self) -> Tangent<Self> { SVector::<f64, 1>::new(self.0) }
+
+    fn adjoint(&self) -> Jacobian<Self> { SMatrix::identity() }
+    fn right_jacobian(_: &Tangent<Self>) -> Jacobian<Self> {
+        SMatrix::identity()
     }
-
-    fn retract(&self, delta: &f64) -> Self {
-        Self(self.0 + *delta)
+    fn right_jacobian_inverse(_: &Tangent<Self>) -> Jacobian<Self> {
+        SMatrix::identity()
     }
 }
 ```
+
+`Dim` determines the solver coordinate count and the shapes of `Tangent<T>` and
+`Jacobian<T>`; a one-dimensional tangent is a nalgebra vector, even if the stored
+state is a scalar. `tangent_from_slice`, `retract`, and `local` have defaults.
+`Allocator = DefaultAllocator` selects fixed-size array storage for these geometry
+values. Generic state access and geometry calls need only `T: Variable`; allocator
+bounds are local to generic numerical code that constructs nalgebra-owned results.
+The [`Variable` documentation](src/variable.rs)
+defines the adjoint, exponential Jacobians, log branches, and derivative conventions.
 
 ### 2. Define the constraint
 
@@ -90,8 +106,8 @@ impl<S: StateStore<Scalar>> Factor<S> for Prior {
 
 The residual is `x - measurement`; its derivative under additive retraction is
 `1`. The sink rejects invalid dimensions and nonfinite coefficients.
-`JacobianBlock::new` checks the column count against the state's `DOF` during
-code generation. It accepts owned matrices and fixed-size views into existing
+`JacobianBlock::new` requires the state's `Dim` as its column dimension during
+type checking. It accepts owned matrices and fixed-size views into existing
 storage, preserving row and column strides without allocation or coefficient
 copies. Ordinary factors emit directly: the solver has already opened their
 factor scope.
@@ -238,7 +254,8 @@ Each optimization call rebuilds the cache, including after graph or model edits.
 - [Batching guide](docs/batching.md): shared models, individual payloads, and the
   ordinary-versus-batched factor-scope rules.
 - [SLAM example](examples/slam.rs): manifold variables and shared trajectory
-  computation across six-variable reprojections. Its application geometry is placeholder code.
+  computation across six-variable reprojections. State Lie-group geometry is implemented;
+  factor geometry remains placeholder code.
 - [Internal design](docs/internals.md): typed pools, schema visitors, and numerical solver passes.
 
 ## Checks and storage timings

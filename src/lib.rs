@@ -46,7 +46,10 @@
 //! # Evaluation contract
 //! A factor owns an independent contribution to the objective. A batch shares
 //! computation across selected factors without merging their graph identities.
-//! Jacobians differentiate the variable's [`Variable::retract`] convention.
+//! Variables implement a Lie group with a fixed nalgebra [`Variable::Dim`].
+//! [`Tangent<T>`](Tangent) and [`Jacobian<T>`](Jacobian)
+//! derive their dimensions from that type. Jacobians differentiate the variable's
+//! right-side [`Variable::retract`] convention; see [`Variable`] for the formulas.
 //!
 //! The intended allocation contract is reusable workspace for iterations over
 //! prepared, unchanged structure. Structural changes may allocate; user evaluators
@@ -78,7 +81,7 @@ pub use optimization::{GaussNewton, OptimizeOptions, OptimizeReport, Termination
 pub use real::Real;
 pub use solver::Solver;
 pub use states::StateStore;
-pub use variable::Variable;
+pub use variable::{Jacobian, Tangent, Variable};
 
 /// Internal support for generated schemas and optimizer/backend dispatch.
 ///

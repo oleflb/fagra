@@ -2,25 +2,50 @@
 //!
 //! Run with `cargo run --example scalar_prior` to optimize in both precisions.
 
-use faer_ext::nalgebra::{SMatrix, SVector};
+use faer_ext::nalgebra::{Const, DefaultAllocator, SMatrix, SVector};
 use fagra::{
-    BlockId, EvaluationError, Factor, JacobianBlock, LinearizationSink, Real, Solver, SolverError,
-    StateKey, StateStore, Variable,
+    BlockId, EvaluationError, Factor, Jacobian, JacobianBlock, LinearizationSink, Real, Solver,
+    SolverError, StateKey, StateStore, Tangent, Variable,
 };
 
+/// The additive real line, with one tangent coordinate in the stored value's units.
 pub struct Scalar<R: Real = f64>(pub R);
 
 impl<R: Real> Variable for Scalar<R> {
     type Scalar = R;
-    type Tangent = R;
-    const DOF: usize = 1;
+    type Dim = Const<1>;
+    type Allocator = DefaultAllocator;
 
-    fn tangent_from_slice(delta: &[R]) -> R {
-        delta[0]
+    fn identity() -> Self {
+        Self(R::zero())
     }
 
-    fn retract(&self, delta: &R) -> Self {
-        Self(self.0 + *delta)
+    fn compose(&self, other: &Self) -> Self {
+        Self(self.0 + other.0)
+    }
+
+    fn inverse(&self) -> Self {
+        Self(-self.0)
+    }
+
+    fn exp(delta: &Tangent<Self>) -> Self {
+        Self(delta[0])
+    }
+
+    fn log(&self) -> Tangent<Self> {
+        SVector::<R, 1>::new(self.0)
+    }
+
+    fn adjoint(&self) -> Jacobian<Self> {
+        SMatrix::identity()
+    }
+
+    fn right_jacobian(_: &Tangent<Self>) -> Jacobian<Self> {
+        SMatrix::identity()
+    }
+
+    fn right_jacobian_inverse(_: &Tangent<Self>) -> Jacobian<Self> {
+        SMatrix::identity()
     }
 }
 

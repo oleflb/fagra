@@ -192,7 +192,7 @@ condition number.
 Each optimization call rebuilds ordering and dependency metadata using retained
 vectors and maps. This handles graph edits and reusing one method across unrelated
 graphs without stale caches. State schema declaration order and each pool's dense
-order determine scalar offsets; all stored states contribute their `DOF` coordinates.
+order determine scalar offsets; all stored states contribute `Dim::DIM` coordinates.
 No-variable problems return their evaluated cost without a linear solve.
 
 GN then uses ordinary library visitor implementations:
