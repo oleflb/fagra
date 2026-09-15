@@ -2,16 +2,17 @@
 //!
 //! Run with `cargo run --example scalar_prior` to optimize in both precisions.
 
-use faer_ext::nalgebra::{Const, DefaultAllocator, SMatrix, SVector};
+use faer_ext::nalgebra::{Const, DefaultAllocator, RealField, SMatrix, SVector};
 use fagra::{
     BlockId, EvaluationError, Factor, Jacobian, JacobianBlock, LinearizationSink, Real, Solver,
     SolverError, StateKey, StateStore, Tangent, Variable,
 };
 
 /// The additive real line, with one tangent coordinate in the stored value's units.
-pub struct Scalar<R: Real = f64>(pub R);
+#[derive(Debug)]
+pub struct Scalar<R: RealField + Copy = f64>(pub R);
 
-impl<R: Real> Variable for Scalar<R> {
+impl<R: RealField + Copy> Variable for Scalar<R> {
     type Scalar = R;
     type Dim = Const<1>;
     type Allocator = DefaultAllocator;
@@ -106,4 +107,34 @@ fn run<R: Real>() -> Result<(), SolverError> {
 fn main() -> Result<(), SolverError> {
     run::<f32>()?;
     run::<f64>()
+}
+
+// Run with: cargo test --example scalar_prior --features test-support
+#[cfg(all(test, feature = "test-support"))]
+mod variable_properties {
+    use super::*;
+    use fagra::testing::{TestScalar, TestVariable, Tolerance, proptest::prelude::*};
+
+    impl<R: TestScalar> TestVariable for Scalar<R> {
+        type Dual = Scalar<R::Dual>;
+
+        fn states() -> impl Strategy<Value = Self> {
+            (-10.0..10.0).prop_map(|x| Self(R::from_test_value(x)))
+        }
+
+        fn increments() -> impl Strategy<Value = Tangent<Self>> {
+            (-1.0..1.0).prop_map(|x| SVector::from_element(R::from_test_value(x)))
+        }
+
+        fn to_dual(&self) -> Self::Dual {
+            Scalar(self.0.dual(0.0))
+        }
+
+        fn equivalent(&self, other: &Self, tolerance: Tolerance) -> bool {
+            tolerance.close(self.0.test_value(), other.0.test_value())
+        }
+    }
+
+    fagra::variable_tests!(double, Scalar<f64>);
+    fagra::variable_tests!(single, Scalar<f32>);
 }

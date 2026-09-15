@@ -65,6 +65,23 @@ bounds are local to generic numerical code that constructs nalgebra-owned result
 The [`Variable` documentation](src/variable.rs)
 defines the adjoint, exponential Jacobians, log branches, and derivative conventions.
 
+### Test your variable implementation
+
+Enable `test-support` on your **dev-dependency**, implement
+`fagra::testing::TestVariable` in a `#[cfg(test)]` module, then register the suite:
+
+```rust,ignore
+fagra::variable_tests!(pose_properties, Pose<f64>);
+```
+
+The generated tests use proptest for sampling/shrinking and matching-precision dual
+numbers to verify the analytical Jacobians. See the [variable testing guide](docs/variable-tests.md)
+and the test module in [the scalar example](examples/scalar_prior.rs):
+
+```sh
+cargo test --example scalar_prior --features test-support
+```
+
 ### 2. Define the constraint
 
 An ordinary `Factor` declares dependencies, evaluates its cost without Jacobians,
@@ -173,6 +190,11 @@ Variables, factors, and batch models declare `type Scalar = R`; evaluators accep
 `L: LinearizationSink<Scalar = R>`. A variable's `tangent_from_slice` receives
 `&[R]`, and costs return `Result<R, EvaluationError>`. See the
 [generic scalar-prior example](examples/scalar_prior.rs) for a complete implementation.
+
+For dual-number geometry tests, implement the variable itself over
+`R: faer_ext::nalgebra::RealField + Copy`. Factors and solver schemas still use
+`R: fagra::Real`; dual variables are evaluated by the test runner, not optimized
+by the numerical backend.
 
 Both schemas and the selected backend must agree on precision. A Jacobian's
 coefficients must match its variable's scalar type. These are compile-time checks.

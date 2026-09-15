@@ -3,12 +3,22 @@ name = "fagra"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+test-support = ["dep:proptest", "dep:num-dual"]
+
 [dependencies]
 faer = { version = "0.24", default-features = false, features = ["std", "linalg"] }
 faer-ext = { version = "0.8", features = ["nalgebra"] }
 # Enable std on faer-ext's nalgebra version; Rust imports use its re-export.
 nalgebra = { version = "0.34", default-features = false, features = ["std"] }
 thiserror = "2.0.20"
+proptest = { version = "1.11", default-features = false, features = ["std"], optional = true }
+# Match faer-ext's nalgebra 0.34 / simba 0.9 geometry traits.
+num-dual = { version = "0.13.6", default-features = false, optional = true }
 
 [dev-dependencies]
 ui_test = "0.30"
+# ui_test's metadata resolver does not forward feature flags. Keep the optional
+# test crates in dev metadata too; its dependency build enables test-support.
+proptest = { version = "1.11", default-features = false, features = ["std"] }
+num-dual = { version = "0.13.6", default-features = false }

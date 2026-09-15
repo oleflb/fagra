@@ -71,6 +71,9 @@ mod states;
 mod storage;
 mod variable;
 
+#[cfg(feature = "test-support")]
+pub mod testing;
+
 pub use error::{EvaluationError, KeyError, SolverError};
 pub use factors::{Factor, FactorBatch, FactorSelection};
 pub use key::{BatchKey, BlockId, FactorId, FactorKey, StateKey};

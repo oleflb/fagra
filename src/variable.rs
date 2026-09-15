@@ -1,4 +1,4 @@
-use faer_ext::nalgebra::{DimName, Matrix, U1, allocator::Allocator};
+use faer_ext::nalgebra::{DimName, Matrix, RealField, U1, allocator::Allocator};
 
 type Buffer<T, Rows, Cols> =
     <<T as Variable>::Allocator as Allocator<Rows, Cols>>::Buffer<<T as Variable>::Scalar>;
@@ -70,7 +70,11 @@ pub type Jacobian<T> = Matrix<
 /// bounds. Keep those requirements local to the numerical code that needs them.
 pub trait Variable: Sized {
     /// Scalar shared by the state, its tangent coordinates, and its Jacobians.
-    type Scalar: crate::Real;
+    ///
+    /// Geometry only requires nalgebra's real-number operations, allowing the
+    /// same implementation to run on dual numbers for derivative tests. Solver
+    /// schemas and factors separately require [`crate::Real`] for backend arithmetic.
+    type Scalar: RealField + Copy;
 
     /// Compile-time tangent dimension, e.g. `faer_ext::nalgebra::Const<6>`.
     ///

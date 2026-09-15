@@ -5,7 +5,8 @@
 //! factor geometry and marginalization remain placeholders, so this is not runnable yet.
 
 use faer_ext::nalgebra::{
-    Const, DefaultAllocator, SMatrix, SVector, UnitQuaternion, Vector2, Vector3,
+    Const, DefaultAllocator, Quaternion, RealField, SMatrix, SVector, UnitQuaternion, Vector2,
+    Vector3,
 };
 use fagra::{
     BlockId, EvaluationError, Factor, FactorBatch, FactorSelection, Jacobian, JacobianBlock,
@@ -19,13 +20,14 @@ use fagra::{
 /// `log` uses the principal rotation branch (angle at most pi), with a branch
 /// discontinuity at pi. The inverse right Jacobian is singular at nonzero
 /// multiples of 2*pi rotation; callers must stay away from those singularities.
-pub struct Pose {
-    pub rotation: UnitQuaternion<f64>,
-    pub translation: Vector3<f64>,
+#[derive(Debug)]
+pub struct Pose<R: RealField + Copy = f64> {
+    pub rotation: UnitQuaternion<R>,
+    pub translation: Vector3<R>,
 }
 
-impl Variable for Pose {
-    type Scalar = f64;
+impl<R: RealField + Copy> Variable for Pose<R> {
+    type Scalar = R;
     type Dim = Const<6>;
     type Allocator = DefaultAllocator;
 
@@ -52,34 +54,64 @@ impl Variable for Pose {
     }
 
     fn exp(delta: &Tangent<Self>) -> Self {
+        let c = |x| R::from_f64(x).unwrap();
         let omega = delta.fixed_rows::<3>(3).into_owned();
-        let mut generator = SMatrix::<f64, 4, 4>::zeros();
-        generator
-            .fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&omega.cross_matrix());
-        generator
-            .fixed_view_mut::<3, 1>(0, 3)
-            .copy_from(&delta.fixed_rows::<3>(0));
+        let velocity = delta.fixed_rows::<3>(0).into_owned();
+        let t2 = omega.norm_squared();
+        // Series in squared angle preserve dual derivatives at exactly zero.
+        // Returning constant identity in that branch would lose the rotation derivative.
+        let (w, a, b, d) = if t2 < c(1e-2) {
+            (
+                R::one() + t2 * (c(-1.0 / 8.0) + t2 * (c(1.0 / 384.0) - t2 * c(1.0 / 46080.0))),
+                c(0.5) + t2 * (c(-1.0 / 48.0) + t2 * (c(1.0 / 3840.0) - t2 * c(1.0 / 645120.0))),
+                c(0.5) + t2 * (c(-1.0 / 24.0) + t2 * (c(1.0 / 720.0) - t2 * c(1.0 / 40320.0))),
+                c(1.0 / 6.0)
+                    + t2 * (c(-1.0 / 120.0) + t2 * (c(1.0 / 5040.0) - t2 * c(1.0 / 362880.0))),
+            )
+        } else {
+            let angle = t2.sqrt();
+            let half = angle * c(0.5);
+            (
+                half.cos(),
+                half.sin() / angle,
+                (R::one() - angle.cos()) / t2,
+                (angle - angle.sin()) / (angle * t2),
+            )
+        };
+        let cross = omega.cross(&velocity);
         Self {
-            rotation: UnitQuaternion::from_scaled_axis(omega),
-            translation: generator.exp().fixed_view::<3, 1>(0, 3).into_owned(),
+            rotation: UnitQuaternion::new_normalize(Quaternion::from_parts(w, omega * a)),
+            translation: velocity + cross * b + omega.cross(&cross) * d,
         }
     }
 
     fn log(&self) -> Tangent<Self> {
+        let c = |x| R::from_f64(x).unwrap();
+        let q = self.rotation.quaternion();
+        let q = if q.w < R::zero() { -*q } else { *q };
+        let vector = q.imag();
+        let s2 = vector.norm_squared();
+        let scale = if s2 < c(1e-4) {
+            c(2.0) + s2 * (c(1.0 / 3.0) + s2 * (c(3.0 / 20.0) + s2 * c(5.0 / 56.0)))
+        } else {
+            let s = s2.sqrt();
+            c(2.0) * s.atan2(q.w) / s
+        };
+        let omega = vector * scale;
+        let t2 = omega.norm_squared();
+        // Value-level SE(3) logarithm, independent of the Jacobian hooks tested by AD.
+        let coefficient = if t2 < c(1e-2) {
+            c(1.0 / 12.0)
+                + t2 * (c(1.0 / 720.0) + t2 * (c(1.0 / 30240.0) + t2 * c(1.0 / 1209600.0)))
+        } else {
+            let half = t2.sqrt() * c(0.5);
+            (R::one() - half / half.tan()) / t2
+        };
+        let cross = omega.cross(&self.translation);
+        let velocity = self.translation - cross * c(0.5) + omega.cross(&cross) * coefficient;
         let mut delta = Tangent::<Self>::zeros();
-        delta
-            .fixed_rows_mut::<3>(3)
-            .copy_from(&self.rotation.scaled_axis());
-        // t = Jl(omega) * v. Its inverse is regular on the principal branch.
-        let jl = Self::right_jacobian(&(-delta))
-            .fixed_view::<3, 3>(0, 0)
-            .into_owned();
-        let v = jl
-            .lu()
-            .solve(&self.translation)
-            .expect("principal SO(3) Jacobian is invertible");
-        delta.fixed_rows_mut::<3>(0).copy_from(&v);
+        delta.fixed_rows_mut::<3>(3).copy_from(&omega);
+        delta.fixed_rows_mut::<3>(0).copy_from(&velocity);
         delta
     }
 
@@ -105,7 +137,7 @@ impl Variable for Pose {
         // block of exp([ -ad(delta), I; 0, 0 ]), including at delta = 0.
         // ponytail: a 12x12 exponential favors clarity; use closed-form SE(3)
         // Jacobians if profiling shows geometry dominates frame evaluation.
-        let mut generator = SMatrix::<f64, 12, 12>::zeros();
+        let mut generator = SMatrix::<R, 12, 12>::zeros();
         generator.fixed_view_mut::<3, 3>(0, 0).copy_from(&(-omega));
         generator.fixed_view_mut::<3, 3>(3, 3).copy_from(&(-omega));
         generator
@@ -128,15 +160,16 @@ impl Variable for Pose {
 ///
 /// The group is all of R^4; its zero identity is not a usable camera calibration.
 /// Projection factors must validate the calibration required by their model.
-pub struct CameraIntrinsics {
-    pub fx: f64,
-    pub fy: f64,
-    pub cx: f64,
-    pub cy: f64,
+#[derive(Debug)]
+pub struct CameraIntrinsics<R: RealField + Copy = f64> {
+    pub fx: R,
+    pub fy: R,
+    pub cx: R,
+    pub cy: R,
 }
 
-impl Variable for CameraIntrinsics {
-    type Scalar = f64;
+impl<R: RealField + Copy> Variable for CameraIntrinsics<R> {
+    type Scalar = R;
     type Dim = Const<4>;
     type Allocator = DefaultAllocator;
 
@@ -162,7 +195,7 @@ impl Variable for CameraIntrinsics {
     }
 
     fn log(&self) -> Tangent<Self> {
-        SVector::<f64, 4>::new(self.fx, self.fy, self.cx, self.cy)
+        SVector::<R, 4>::new(self.fx, self.fy, self.cx, self.cy)
     }
 
     fn adjoint(&self) -> Jacobian<Self> {
@@ -179,10 +212,11 @@ impl Variable for CameraIntrinsics {
 }
 
 /// Additive world-space coordinates `[x, y, z]`, in the pose's translation units.
-pub struct Landmark(pub Vector3<f64>);
+#[derive(Debug)]
+pub struct Landmark<R: RealField + Copy = f64>(pub Vector3<R>);
 
-impl Variable for Landmark {
-    type Scalar = f64;
+impl<R: RealField + Copy> Variable for Landmark<R> {
+    type Scalar = R;
     type Dim = Const<3>;
     type Allocator = DefaultAllocator;
 
