@@ -125,7 +125,7 @@ impl<'a, F> Iterator for FactorSelection<'a, F> {
     type Item = (FactorId, &'a F);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.len() == 0 {
+        if Self::is_empty(self) {
             return None;
         }
         let index = self.position;

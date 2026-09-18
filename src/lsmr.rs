@@ -209,7 +209,6 @@ impl<R: Real> LeastSquaresBackend for Lsmr<R> {
         if m == 0 || n == 0 {
             return Ok(&self.step);
         }
-        // ponytail: identity preconditioning; add column scaling if iteration counts dominate.
         let precond = IdentityPrecond { dim: n };
         // faer 0.24.4 omits wbar and vold from lsmr_scratch; both are n-by-1.
         // Remove this extra space when upstream's scratch calculation is fixed.

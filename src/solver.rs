@@ -215,7 +215,7 @@ impl<S: StateSchema> Dependencies<'_, S> {
             }
         }
 
-        // ponytail: O(families) per dependency on graph edits; add a pool-ID routing
+        // O(families) per dependency on graph edits; add a pool-ID routing
         // index if measured insertion throughput warrants it. State reads stay O(1).
         let mut resolve = Resolve { id, result: None };
         self.states.visit(&mut resolve).unwrap();
