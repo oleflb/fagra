@@ -85,7 +85,7 @@ pub use error::{EvaluationError, KeyError, SolverError};
 pub use factors::{Factor, FactorBatch, FactorSelection};
 pub use key::{BatchKey, BlockId, FactorId, FactorKey, StateKey};
 pub use linearization::{JacobianBlock, LinearizationSink};
-pub use lsmr::{Lsmr, LsmrStatistics};
+pub use lsmr::{Lsmr, LsmrDiagnostics, LsmrStatistics, LsmrTermination, LsmrTimings};
 pub use marginalization::{MarginalizationOptions, MarginalizationReport};
 pub use normal::DenseNormalCholesky;
 pub use optimization::{

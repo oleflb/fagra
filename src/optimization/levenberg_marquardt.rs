@@ -139,6 +139,9 @@ impl<R: Real> Default for LmStatistics<R> {
 pub struct LevenbergMarquardt<B: DampedLeastSquaresBackend = Lsmr> {
     /// Method-specific controls; validated before graph evaluation.
     pub options: LmOptions<B::Scalar>,
+    /// Optional observer after each accepted step. Default: None.
+    /// The cost is current; the gradient still describes the preceding linearization.
+    pub on_accept: Option<fn(LmStatistics<B::Scalar>)>,
     work: Workspace<B>,
     statistics: LmStatistics<B::Scalar>,
 }
@@ -147,6 +150,7 @@ impl<B: DampedLeastSquaresBackend> LevenbergMarquardt<B> {
     pub fn new(backend: B) -> Self {
         Self {
             options: LmOptions::default(),
+            on_accept: None,
             work: Workspace::new(backend),
             statistics: LmStatistics::default(),
         }
@@ -283,6 +287,9 @@ where
                                             .max(self.options.min_damping)
                                             .min(self.options.max_damping);
                                         accepted = true;
+                                        if let Some(observe) = self.on_accept {
+                                            observe(self.statistics);
+                                        }
                                         break;
                                     }
                                     TrialFailure::PoorAgreement

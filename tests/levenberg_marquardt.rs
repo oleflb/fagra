@@ -344,6 +344,9 @@ fn linear_solve_failures_are_bounded_and_accepted_progress_survives_limits() {
     }
     let mut backend = Lsmr::default();
     backend.max_iterations = 1;
+    // Identity preconditioning keeps this deliberately unequal diagonal system
+    // from becoming a one-iteration solve under column normalization.
+    backend.diagonal_preconditioning = false;
     let mut lm = LevenbergMarquardt::new(backend);
     lm.options.max_trials = 2;
     assert!(matches!(
@@ -452,7 +455,7 @@ struct Measurement {
     gradient: f64,
 }
 
-fn compare(n: usize, kind: Kind, use_lm: bool, samples: usize) -> Vec<Measurement> {
+fn compare(n: usize, kind: Kind, use_lm: bool, samples: usize, block: bool) -> Vec<Measurement> {
     let options = OptimizeOptions {
         max_iterations: 100,
         gradient_tolerance: 1e-8,
@@ -460,7 +463,9 @@ fn compare(n: usize, kind: Kind, use_lm: bool, samples: usize) -> Vec<Measuremen
         cost_tolerance: 0.0,
     };
     let mut gn = GaussNewton::new(Lsmr::default());
-    let mut lm = LevenbergMarquardt::new(Lsmr::default());
+    let mut backend = Lsmr::default();
+    backend.block_preconditioning = block;
+    let mut lm = LevenbergMarquardt::new(backend);
     let mut resetter = GaussNewton::new(Lsmr::default());
     let mut measurements = Vec::new();
     for sample in 0..samples + 3 {
@@ -579,12 +584,14 @@ fn compare(n: usize, kind: Kind, use_lm: bool, samples: usize) -> Vec<Measuremen
 
 #[test]
 fn warmed_lm_retries_and_graph_switching_allocate_nothing() {
-    for kind in [Kind::Square, Kind::Atan, Kind::Log] {
-        for m in compare(16, kind, true, 3) {
-            assert!(m.solved, "{kind:?}: {m:?}");
-            assert_eq!(m.allocations, 0, "{kind:?}: {m:?}");
-            if matches!(kind, Kind::Atan | Kind::Log) {
-                assert!(m.rejected > 0);
+    for block in [false, true] {
+        for kind in [Kind::Square, Kind::Atan, Kind::Log] {
+            for m in compare(16, kind, true, 3, block) {
+                assert!(m.solved, "{kind:?}: {m:?}");
+                assert_eq!(m.allocations, 0, "{kind:?}: {m:?}");
+                if matches!(kind, Kind::Atan | Kind::Log) {
+                    assert!(m.rejected > 0);
+                }
             }
         }
     }
@@ -599,7 +606,7 @@ fn benchmark() {
     for kind in [Kind::Square, Kind::Atan, Kind::Log] {
         for n in [32, 256] {
             for use_lm in [false, true] {
-                let mut runs = compare(n, kind, use_lm, 31);
+                let mut runs = compare(n, kind, use_lm, 31, false);
                 runs.sort_by(|a, b| a.us.total_cmp(&b.us));
                 let median = &runs[runs.len() / 2];
                 let successes = runs.iter().filter(|m| m.solved).count();
