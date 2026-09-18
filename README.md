@@ -7,8 +7,8 @@ Define variables and constraints, declare their types, insert values, optimize,
 and read estimates through typed keys.
 
 **Status:** graph construction, stable generational handles, state access, ordinary
-and batched factor insertion, cost evaluation, removal, and Gauss–Newton
-optimization work. Bulk square-root marginalization replaces selected states and
+and batched factor insertion, cost evaluation, removal, and Gauss–Newton and
+Levenberg–Marquardt optimization work. Bulk square-root marginalization replaces selected states and
 their incident factors with internal manifold priors.
 
 ## Quick start: one scalar and one prior
@@ -287,6 +287,41 @@ and unpreconditioned. Before constructing the optimizer, set `Lsmr::max_iteratio
 (default 1000) and `Lsmr::relative_tolerance` (default `max(1e-10, 128ε)`) to tune the inner solve.
 Linear iteration exhaustion returns `LinearSolveFailed` before applying a step.
 Each optimization call rebuilds the cache, including after graph or model edits.
+
+### Levenberg–Marquardt
+
+For nonlinear problems where full GN steps overshoot or leave the model's domain:
+
+```rust,ignore
+use fagra::{LevenbergMarquardt, Lsmr, OptimizeOptions};
+
+let mut method = LevenbergMarquardt::new(Lsmr::default());
+method.options.max_trials = 16; // Solve attempts per cached linearization.
+let result = solver.optimize_with(&mut method, &OptimizeOptions::default());
+let progress = method.statistics(); // Also available when result is an error.
+let linear_work = method.backend().statistics();
+let report = result?;
+```
+
+LM solves `||J delta + r||² + lambda ||D delta||²`, with `D` derived from
+Jacobian column norms. Damping rows are implicit: no normal equations or dense
+diagonal matrix are formed. Rejected attempts reuse the cached Jacobians and all
+buffers; they only repeat the linear solve, retraction, and cost evaluation.
+Warm calls within retained capacity are allocation-free when user code is too.
+
+`LmOptions` controls damping bounds, the column-norm floor, acceptance ratio, and
+retry count. Damping starts fresh each call. Only cost-decreasing steps with
+adequate actual/predicted agreement are accepted. Invalid trial geometry can be
+retried; invalid accepted-state geometry, keys, or emissions return an error.
+Retry exhaustion or stagnation returns `NoProgress`, retaining accepted estimates.
+
+On nonempty graphs LM reports success only after checking gradient tolerance.
+Small accepted steps with small cost changes trigger a fresh gradient check rather
+than declaring an over-damped step converged. Set `step_tolerance = 0` to disable
+that stagnation check; `cost_tolerance = 0` disables its additional cost condition.
+Marginal priors participate in costs and Jacobians, but optimizer damping is never
+marginalized. The default `solver.optimize()` remains GN with Cholesky; LM currently
+supports the LSMR backend. See [GN versus LM measurements](docs/lm-performance.md).
 
 ## Marginalization
 

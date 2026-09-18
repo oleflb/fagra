@@ -157,7 +157,8 @@ default parallel, sparse-solver, random-generation, or NumPy I/O features.
 
 `src/optimization.rs` contains the shared interfaces, layout, checked sink, and
 state/cost visitors. Nonlinear methods live in child modules such as
-`src/optimization/gauss_newton.rs`, which owns GN's workspace and iteration policy.
+`src/optimization/gauss_newton.rs` and `src/optimization/levenberg_marquardt.rs`.
+Both reuse the same graph layout, checked sink, and linearization workspace.
 The dense Cholesky backend lives separately in `src/normal.rs`.
 
 `Solver<S, F>` owns the graph and a retained default
@@ -170,8 +171,25 @@ priors, separating nonlinear orchestration from graph ownership.
 borrowed solution slice. Runtime row counts support marginal priors without
 weakening the public factor API's compile-time dimension checks.
 Its representation is unconstrained: QR can retain rows, while CG can use a matrix
-or block operator. LM will need regularization and model-prediction extensions;
-those methods and alternate algorithms are not implemented yet.
+or block operator. `DampedLeastSquaresBackend` adds preparation of fixed column-norm
+scales and repeatable damped solves with predicted reduction. LSMR implements it;
+normal-equation Cholesky retains its existing destructive, undamped solve.
+
+LM uses `D_j = max(||J[:,j]||, min_column_norm)` and the implicit operator
+`[J; sqrt(lambda) D]`. Column norms are computed once per linearization; the base
+Jacobian, gradient, and residual are not changed by retries. The prediction is
+computed directly as `-gᵀ delta - 0.5 ||J delta||²` with a cached Jacobian product,
+so approximate LSMR solves need not satisfy an exact-solve identity. Both GN and
+LM use identity preconditioning; damping scales are not a right preconditioner.
+
+The acceptance ratio uses the actual undamped nonlinear objective, including
+state-dependent marginal priors but excluding accumulated constant cost. Nielsen's
+damping update reduces damping after good steps; rejected attempts increase it
+with a growing multiplier. Trial guards reject invalid or uphill candidates and
+restore every state family before another attempt. Damping, retries, and accepted
+steps are bounded. Jacobians are reevaluated only after acceptance, including a
+final gradient check. Small-step stagnation cannot report convergence with a large
+gradient. Diagnostic counters remain available after ordinary errors.
 
 `LeastSquaresBackend::Scalar` determines the coefficients and step buffer, and
 `GaussNewton<B>` requires it to match the schemas. `OptimizeOptions<R>` and
