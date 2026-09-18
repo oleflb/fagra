@@ -12,8 +12,10 @@ use crate::{
 };
 
 mod gauss_newton;
+mod levenberg_marquardt;
 
 pub use gauss_newton::GaussNewton;
+pub use levenberg_marquardt::{LevenbergMarquardt, LmOptions, LmStatistics, TrialFailure};
 
 /// Stopping controls shared by nonlinear optimizers.
 ///
@@ -23,15 +25,19 @@ pub use gauss_newton::GaussNewton;
 /// Absolute gradient and step tolerances may need tuning for the model's units.
 #[derive(Debug, Clone, Copy)]
 pub struct OptimizeOptions<R: Real = f64> {
-    /// Maximum number of accepted full steps; must be positive.
+    /// Maximum number of accepted steps; must be positive.
     pub max_iterations: usize,
     /// Stop when the infinity norm of Jᵀr is at most this absolute tolerance.
     pub gradient_tolerance: R,
     /// Stop before applying a step whose infinity norm is at most this value.
     /// Units are the variables' tangent coordinates, not an ambient state norm.
+    /// LM instead uses small accepted steps for stagnation detection and checks
+    /// the gradient again before reporting convergence.
     pub step_tolerance: R,
     /// Stop after a nonnegative cost decrease no larger than this value times
     /// `max(1, previous_cost)`. An exactly zero cost also terminates.
+    /// For LM this is the additional cost-change condition for stagnation;
+    /// only gradient tolerance establishes convergence on nonempty graphs.
     pub cost_tolerance: R,
 }
 
@@ -132,6 +138,103 @@ pub trait LeastSquaresBackend {
     /// step's finiteness before retraction; no separate output copy is required.
     /// May destroy the model and RHS: call once per completed linearization.
     fn solve(&mut self) -> Result<&[Self::Scalar], SolverError>;
+}
+
+/// A damped step and its predicted reduction in the undamped local objective.
+pub struct DampedStep<'a, R> {
+    /// Borrowed right-increment coordinates.
+    pub delta: &'a [R],
+    /// `-gᵀ delta - 0.5 ||J delta||²`, valid for approximate linear solves too.
+    pub predicted_reduction: R,
+}
+
+/// Backend capability for retrying a cached linearization with diagonal damping.
+pub trait DampedLeastSquaresBackend: LeastSquaresBackend {
+    /// Prepare fixed column-norm damping scales for this linearization.
+    fn prepare_damping(&mut self, min_column_norm: Self::Scalar) -> Result<(), SolverError>;
+    /// Solve `||J delta + r||² + lambda ||D delta||²` without destroying the
+    /// cached undamped model. Repeated calls may change only `lambda`.
+    fn solve_damped(
+        &mut self,
+        lambda: Self::Scalar,
+    ) -> Result<DampedStep<'_, Self::Scalar>, SolverError>;
+}
+
+struct Workspace<B> {
+    backend: B,
+    layout: Layout,
+    seen: Vec<bool>,
+    block_marks: Vec<usize>,
+    columns: Vec<usize>,
+}
+
+impl<B> Workspace<B> {
+    fn new(backend: B) -> Self {
+        Self {
+            backend,
+            layout: Layout::default(),
+            seen: Vec::new(),
+            block_marks: Vec::new(),
+            columns: Vec::new(),
+        }
+    }
+}
+
+impl<B: LeastSquaresBackend> Workspace<B> {
+    fn prepare<S: StateSchema<Scalar = B::Scalar>, F: FactorSchema<S, Scalar = B::Scalar>>(
+        &mut self,
+        states: &mut S,
+        factors: &mut F,
+    ) -> Result<(), SolverError> {
+        self.layout.clear();
+        states.visit(&mut self.layout)?;
+        factors.visit(&mut self.layout)?;
+        self.backend.prepare(self.layout.dimension)?;
+        self.seen.resize(self.layout.factors.len(), false);
+        self.block_marks.resize(self.layout.blocks.len(), 0);
+        self.columns.clear();
+        self.columns.reserve(
+            self.layout
+                .factors
+                .iter()
+                .map(|p| p.dependencies.len())
+                .max()
+                .unwrap_or(0),
+        );
+        Ok(())
+    }
+
+    fn linearize<S: StateSchema<Scalar = B::Scalar>, F: FactorSchema<S, Scalar = B::Scalar>>(
+        &mut self,
+        states: &mut S,
+        factors: &mut F,
+        priors: &mut Priors<B::Scalar>,
+    ) -> Result<(), SolverError> {
+        self.backend.clear();
+        self.seen.fill(false);
+        self.block_marks.fill(0);
+        let mut sink = CheckedSink {
+            backend: &mut self.backend,
+            layout: &self.layout,
+            seen: &mut self.seen,
+            block_marks: &mut self.block_marks,
+            columns: &mut self.columns,
+            emission: 0,
+            allowed: 0..0,
+            next_expected: 0,
+            active: None,
+            failed: false,
+        };
+        factors.visit(&mut Linearize {
+            states,
+            sink: &mut sink,
+            position: 0,
+        })?;
+        if sink.failed || sink.seen.iter().any(|seen| !seen) {
+            return Err(EvaluationError::InvalidEmission.into());
+        }
+        priors.linearize(states, &mut self.backend, &self.layout, None)
+    }
 }
 
 pub(crate) struct Block {

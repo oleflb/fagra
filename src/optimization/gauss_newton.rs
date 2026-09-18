@@ -1,8 +1,8 @@
 //! Full-step Gauss–Newton; shared graph mechanics live in the parent module.
 
 use super::{
-    Accept, CheckedSink, Layout, LeastSquaresBackend, Linearize, OptimizeOptions, OptimizeReport,
-    Optimizer, Stage, TerminationReason, Trial, cost, norm_inf,
+    Accept, LeastSquaresBackend, OptimizeOptions, OptimizeReport, Optimizer, Stage,
+    TerminationReason, Trial, Workspace, cost, norm_inf,
 };
 use crate::{
     DenseNormalCholesky, EvaluationError, SolverError, factors::FactorSchema,
@@ -19,23 +19,20 @@ use faer::traits::math_utils::{max, one, zero};
 /// Finite full steps are accepted even if cost increases. There is no damping or
 /// line search. A failed trial evaluation restores the last accepted estimates.
 pub struct GaussNewton<B = DenseNormalCholesky> {
-    backend: B,
-    layout: Layout,
-    seen: Vec<bool>,
-    block_marks: Vec<usize>,
-    columns: Vec<usize>,
+    work: Workspace<B>,
 }
 
 impl<B> GaussNewton<B> {
     /// Construct a reusable optimizer with the chosen backend.
     pub fn new(backend: B) -> Self {
         Self {
-            backend,
-            layout: Layout::default(),
-            seen: Vec::new(),
-            block_marks: Vec::new(),
-            columns: Vec::new(),
+            work: Workspace::new(backend),
         }
+    }
+
+    /// Inspect backend diagnostics after an optimization call.
+    pub fn backend(&self) -> &B {
+        &self.work.backend
     }
 }
 
@@ -59,9 +56,7 @@ where
         options: &OptimizeOptions<S::Scalar>,
     ) -> Result<OptimizeReport<S::Scalar>, SolverError> {
         options.validate()?;
-        self.layout.clear();
-        states.visit(&mut self.layout)?;
-        factors.visit(&mut self.layout)?;
+        self.work.prepare(states, factors)?;
         let initial_cost = cost(states, factors, priors)?;
         let constant = priors.constant;
         checked_cost(Ok(initial_cost + constant))?;
@@ -73,50 +68,12 @@ where
             iterations,
             termination,
         };
-        if self.layout.dimension == 0 {
+        if self.work.layout.dimension == 0 {
             return Ok(report(TerminationReason::NoVariables, 0, current_cost));
         }
-        self.backend.prepare(self.layout.dimension)?;
-        self.seen.resize(self.layout.factors.len(), false);
-        self.block_marks.resize(self.layout.blocks.len(), 0);
-        self.columns.clear();
-        self.columns.reserve(
-            self.layout
-                .factors
-                .iter()
-                .map(|p| p.dependencies.len())
-                .max()
-                .unwrap_or(0),
-        );
-
         loop {
-            self.backend.clear();
-            self.seen.fill(false);
-            self.block_marks.fill(0);
-            {
-                let mut sink = CheckedSink {
-                    backend: &mut self.backend,
-                    layout: &self.layout,
-                    seen: &mut self.seen,
-                    block_marks: &mut self.block_marks,
-                    columns: &mut self.columns,
-                    emission: 0,
-                    allowed: 0..0,
-                    next_expected: 0,
-                    active: None,
-                    failed: false,
-                };
-                factors.visit(&mut Linearize {
-                    states,
-                    sink: &mut sink,
-                    position: 0,
-                })?;
-                if sink.failed || sink.seen.iter().any(|seen| !seen) {
-                    return Err(EvaluationError::InvalidEmission.into());
-                }
-            }
-            priors.linearize(states, &mut self.backend, &self.layout, None)?;
-            if self.backend.gradient_norm()? <= options.gradient_tolerance {
+            self.work.linearize(states, factors, priors)?;
+            if self.work.backend.gradient_norm()? <= options.gradient_tolerance {
                 return Ok(report(
                     TerminationReason::GradientTolerance,
                     iterations,
@@ -126,8 +83,8 @@ where
             if iterations == options.max_iterations {
                 return Err(SolverError::NoConvergence);
             }
-            let delta = self.backend.solve()?;
-            if delta.len() != self.layout.dimension {
+            let delta = self.work.backend.solve()?;
+            if delta.len() != self.work.layout.dimension {
                 return Err(SolverError::LinearSolveFailed);
             }
             let step_norm = norm_inf(delta).map_err(|_| SolverError::LinearSolveFailed)?;
