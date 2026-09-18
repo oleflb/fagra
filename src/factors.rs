@@ -92,6 +92,17 @@ pub struct FactorSelection<'a, F> {
     position: usize,
 }
 
+impl<F> Clone for FactorSelection<'_, F> {
+    fn clone(&self) -> Self {
+        Self {
+            pool: self.pool,
+            keys: self.keys,
+            values: self.values,
+            position: self.position,
+        }
+    }
+}
+
 impl<'a, F> FactorSelection<'a, F> {
     pub(crate) fn contiguous(pool: PoolId, keys: &'a [LocalKey], values: &'a [F]) -> Self {
         assert_eq!(keys.len(), values.len());

@@ -7,7 +7,7 @@
 //! # Status
 //! Graph construction, generational handles, checked state access, factor and
 //! batch insertion, cost evaluation, removal, and Gauss–Newton optimization
-//! are implemented. [`Solver::marginalize`] remains a `todo!()` stub.
+//! and bulk square-root [`marginalization`](Solver::marginalize) are implemented.
 //!
 //! # Quick start: one scalar and one prior
 //! [`Variable`] defines how a state changes. [`Factor`] declares its dependencies,
@@ -63,6 +63,7 @@ mod factors;
 mod key;
 mod linearization;
 mod lsmr;
+mod marginalization;
 mod normal;
 mod optimization;
 mod real;
@@ -79,6 +80,7 @@ pub use factors::{Factor, FactorBatch, FactorSelection};
 pub use key::{BatchKey, BlockId, FactorId, FactorKey, StateKey};
 pub use linearization::{JacobianBlock, LinearizationSink};
 pub use lsmr::Lsmr;
+pub use marginalization::{MarginalizationOptions, MarginalizationReport};
 pub use normal::DenseNormalCholesky;
 pub use optimization::{GaussNewton, OptimizeOptions, OptimizeReport, TerminationReason};
 pub use real::Real;
@@ -94,6 +96,7 @@ pub use variable::{Jacobian, Tangent, Variable};
 #[doc(hidden)]
 pub mod __private {
     pub use crate::factors::{FactorSchema, FactorStore, FactorVisitor};
+    pub use crate::marginalization::Priors;
     pub use crate::optimization::{LeastSquaresBackend, Optimizer};
     pub use crate::states::{StateSchema, StateVisitor};
     pub use crate::storage::{BatchPool, FactorPool, PoolAccess, StatePool};

@@ -5,7 +5,8 @@ use super::{
     Optimizer, Stage, TerminationReason, Trial, cost, norm_inf,
 };
 use crate::{
-    DenseNormalCholesky, EvaluationError, SolverError, factors::FactorSchema, states::StateSchema,
+    DenseNormalCholesky, EvaluationError, SolverError, factors::FactorSchema,
+    marginalization::Priors, states::StateSchema, storage::checked_cost,
 };
 use faer::traits::math_utils::{max, one, zero};
 
@@ -54,18 +55,21 @@ where
         &mut self,
         states: &mut S,
         factors: &mut F,
+        priors: &mut Priors<S::Scalar>,
         options: &OptimizeOptions<S::Scalar>,
     ) -> Result<OptimizeReport<S::Scalar>, SolverError> {
         options.validate()?;
         self.layout.clear();
         states.visit(&mut self.layout)?;
         factors.visit(&mut self.layout)?;
-        let initial_cost = cost(states, factors)?;
+        let initial_cost = cost(states, factors, priors)?;
+        let constant = priors.constant;
+        checked_cost(Ok(initial_cost + constant))?;
         let mut current_cost = initial_cost;
         let mut iterations = 0;
         let report = |termination, iterations, final_cost| OptimizeReport {
-            initial_cost,
-            final_cost,
+            initial_cost: initial_cost + constant,
+            final_cost: final_cost + constant,
             iterations,
             termination,
         };
@@ -111,6 +115,7 @@ where
                     return Err(EvaluationError::InvalidEmission.into());
                 }
             }
+            priors.linearize(states, &mut self.backend, &self.layout, None)?;
             if self.backend.gradient_norm()? <= options.gradient_tolerance {
                 return Ok(report(
                     TerminationReason::GradientTolerance,
@@ -141,7 +146,8 @@ where
                 if stage.position != delta.len() {
                     return Err(EvaluationError::DimensionMismatch.into());
                 }
-                trial_cost = cost(trial.states, factors)?;
+                trial_cost = cost(trial.states, factors, priors)?;
+                checked_cost(Ok(trial_cost + constant))?;
                 trial.states.visit(&mut Accept).unwrap();
                 // Trial's drop now clears old accepted values after all buffers swap.
             }

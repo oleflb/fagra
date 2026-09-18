@@ -5,6 +5,7 @@ use crate::{
     KeyError, Real, SolverError, StateKey, Variable,
     dense::DensePool,
     key::{LocalKey, RawKey},
+    marginalization::Anchor,
 };
 
 /// Direct access to one concrete pool in a macro-generated schema.
@@ -25,6 +26,7 @@ pub trait PoolAccess<P> {
 /// an empty pool with a fresh identity, without requiring `T: Default`.
 pub struct StatePool<T: Variable> {
     entries: DensePool<T>,
+    pub(crate) anchors: Vec<Anchor<T>>,
     trial: Vec<T>,
     trial_active: bool,
 }
@@ -33,6 +35,7 @@ impl<T: Variable> Default for StatePool<T> {
     fn default() -> Self {
         Self {
             entries: DensePool::default(),
+            anchors: Vec::new(),
             trial: Vec::new(),
             trial_active: false,
         }
@@ -40,6 +43,18 @@ impl<T: Variable> Default for StatePool<T> {
 }
 
 impl<T: Variable> StatePool<T> {
+    pub(crate) fn remove_selected(&mut self, ids: &std::collections::HashSet<BlockId>) {
+        for index in (0..self.entries.keys.len()).rev() {
+            let raw = RawKey {
+                pool: self.entries.id,
+                local: self.entries.keys[index],
+            };
+            if ids.contains(&BlockId(raw)) {
+                self.entries.remove(raw).expect("live state");
+            }
+        }
+    }
+
     /// Borrow the current estimate after validating the key.
     ///
     /// Removed, unknown, and foreign keys are rejected in constant time.
@@ -155,6 +170,18 @@ impl<T> Default for FactorPool<T> {
 }
 
 impl<T> FactorPool<T> {
+    pub(crate) fn remove_selected(&mut self, ids: &std::collections::HashSet<FactorId>) {
+        for index in (0..self.entries.keys.len()).rev() {
+            let raw = RawKey {
+                pool: self.entries.id,
+                local: self.entries.keys[index],
+            };
+            if ids.contains(&FactorId(raw)) {
+                self.entries.remove(raw).expect("live factor");
+            }
+        }
+    }
+
     /// Reserve payload and identity capacity for additional factors.
     pub fn reserve(&mut self, additional: usize) {
         self.entries.reserve(additional);
@@ -225,6 +252,82 @@ impl<B, P> Default for BatchPool<B, P> {
 }
 
 impl<B, P> BatchPool<B, P> {
+    /// Pack selected payloads temporarily, restoring the exact order even on panic.
+    /// The directory remains unchanged: evaluators only receive states and slices.
+    pub(crate) fn with_selected<E>(
+        &mut self,
+        selected: &std::collections::HashSet<FactorId>,
+        swaps: &mut Vec<(usize, usize)>,
+        mut evaluate: impl FnMut(&B, FactorSelection<'_, P>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        struct Packed<'a, B, P> {
+            batch: &'a mut Batch<B, P>,
+            swaps: &'a mut Vec<(usize, usize)>,
+        }
+        impl<B, P> Drop for Packed<'_, B, P> {
+            fn drop(&mut self) {
+                for &(a, b) in self.swaps.iter().rev() {
+                    self.batch.values.swap(a, b);
+                    self.batch.keys.swap(a, b);
+                }
+            }
+        }
+        for batch in &mut self.batches.values {
+            swaps.clear();
+            let packed = Packed { batch, swaps };
+            let mut count = 0;
+            for index in 0..packed.batch.keys.len() {
+                let id = FactorId(RawKey {
+                    pool: self.locations.id,
+                    local: packed.batch.keys[index],
+                });
+                if selected.contains(&id) {
+                    if index != count {
+                        packed.swaps.push((index, count));
+                        packed.batch.values.swap(index, count);
+                        packed.batch.keys.swap(index, count);
+                    }
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                evaluate(
+                    &packed.batch.model,
+                    FactorSelection::contiguous(
+                        self.locations.id,
+                        &packed.batch.keys[..count],
+                        &packed.batch.values[..count],
+                    ),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn remove_selected(&mut self, ids: &std::collections::HashSet<FactorId>) {
+        for batch in 0..self.batches.values.len() {
+            for index in (0..self.batches.values[batch].keys.len()).rev() {
+                let raw = RawKey {
+                    pool: self.locations.id,
+                    local: self.batches.values[batch].keys[index],
+                };
+                if ids.contains(&FactorId(raw)) {
+                    self.remove_factor(FactorKey::from_raw(raw))
+                        .expect("live payload");
+                }
+            }
+        }
+    }
+
+    /// Remove an empty batch and invalidate its handle. Reject nonempty batches.
+    pub fn remove_empty(&mut self, key: BatchKey<B>) -> Result<(), SolverError> {
+        if !self.batches.get(key.raw)?.values.is_empty() {
+            return Err(SolverError::BatchNotEmpty);
+        }
+        self.batches.remove(key.raw)?;
+        Ok(())
+    }
+
     /// Reserve capacity for additional batch models.
     pub fn reserve(&mut self, additional: usize) {
         self.batches.reserve(additional);

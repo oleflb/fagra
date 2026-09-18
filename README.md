@@ -8,7 +8,8 @@ and read estimates through typed keys.
 
 **Status:** graph construction, stable generational handles, state access, ordinary
 and batched factor insertion, cost evaluation, removal, and Gauss–Newton
-optimization work. `marginalize()` remains a `todo!()` stub.
+optimization work. Bulk square-root marginalization replaces selected states and
+their incident factors with internal manifold priors.
 
 ## Quick start: one scalar and one prior
 

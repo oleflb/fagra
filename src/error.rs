@@ -37,6 +37,12 @@ pub enum EvaluationError {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum SolverError {
+    /// A numerical rank tolerance was negative, nonfinite, or at least one.
+    #[error("relative rank tolerance must be finite and in [0, 1)")]
+    InvalidRankTolerance,
+    /// Only empty batches may be retired explicitly.
+    #[error("batch still contains factors")]
+    BatchNotEmpty,
     /// Iteration limits or convergence tolerances are invalid.
     #[error("optimization requires a positive iteration limit and finite, nonnegative tolerances")]
     InvalidOptions,

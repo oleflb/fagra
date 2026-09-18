@@ -6,6 +6,7 @@ use crate::{
     BlockId, EvaluationError, Factor, FactorBatch, FactorId, JacobianBlock, LinearizationSink,
     Real, SolverError, Variable,
     factors::{FactorSchema, FactorVisitor},
+    marginalization::Priors,
     states::{StateSchema, StateVisitor},
     storage::{BatchPool, FactorPool, StatePool, checked_cost},
 };
@@ -98,6 +99,7 @@ pub trait Optimizer<S: StateSchema, F> {
         &mut self,
         states: &mut S,
         factors: &mut F,
+        priors: &mut Priors<S::Scalar>,
         options: &OptimizeOptions<S::Scalar>,
     ) -> Result<OptimizeReport<S::Scalar>, SolverError>;
 }
@@ -132,28 +134,28 @@ pub trait LeastSquaresBackend {
     fn solve(&mut self) -> Result<&[Self::Scalar], SolverError>;
 }
 
-struct Block {
-    id: BlockId,
-    offset: usize,
-    width: usize,
+pub(crate) struct Block {
+    pub(crate) id: BlockId,
+    pub(crate) offset: usize,
+    pub(crate) width: usize,
 }
-struct FactorPlan {
-    id: FactorId,
-    dependencies: Range<usize>,
+pub(crate) struct FactorPlan {
+    pub(crate) id: FactorId,
+    pub(crate) dependencies: Range<usize>,
 }
 
 #[derive(Default)]
-struct Layout {
-    dimension: usize,
-    blocks: Vec<Block>,
-    block_index: HashMap<BlockId, usize>,
-    factors: Vec<FactorPlan>,
-    factor_index: HashMap<FactorId, usize>,
-    dependencies: Vec<usize>,
+pub(crate) struct Layout {
+    pub(crate) dimension: usize,
+    pub(crate) blocks: Vec<Block>,
+    pub(crate) block_index: HashMap<BlockId, usize>,
+    pub(crate) factors: Vec<FactorPlan>,
+    pub(crate) factor_index: HashMap<FactorId, usize>,
+    pub(crate) dependencies: Vec<usize>,
 }
 
 impl Layout {
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.dimension = 0;
         self.blocks.clear();
         self.block_index.clear();
@@ -162,7 +164,7 @@ impl Layout {
         self.dependencies.clear();
     }
 
-    fn factor(
+    pub(crate) fn factor(
         &mut self,
         id: FactorId,
         visit: impl FnOnce(&mut dyn FnMut(BlockId)),
@@ -265,13 +267,17 @@ impl<S, R: Real> FactorVisitor<S, R> for Cost<'_, S, R> {
     }
 }
 
-fn cost<S, F: FactorSchema<S>>(states: &S, factors: &mut F) -> Result<F::Scalar, SolverError> {
+fn cost<S: StateSchema, F: FactorSchema<S, Scalar = S::Scalar>>(
+    states: &mut S,
+    factors: &mut F,
+    priors: &mut Priors<S::Scalar>,
+) -> Result<S::Scalar, SolverError> {
     let mut visitor = Cost {
-        states,
+        states: &*states,
         total: faer::traits::math_utils::zero::<F::Scalar>(),
     };
     factors.visit(&mut visitor)?;
-    checked_cost(Ok(visitor.total))
+    checked_cost(Ok(visitor.total + priors.cost(states)?))
 }
 
 struct Stage<'a, R> {
@@ -331,17 +337,17 @@ impl<S: StateSchema> Drop for Trial<'_, S> {
     }
 }
 
-struct CheckedSink<'a, B> {
-    backend: &'a mut B,
-    layout: &'a Layout,
-    seen: &'a mut [bool],
-    block_marks: &'a mut [usize],
-    columns: &'a mut Vec<usize>,
-    emission: usize,
-    allowed: Range<usize>,
-    next_expected: usize,
-    active: Option<usize>,
-    failed: bool,
+pub(crate) struct CheckedSink<'a, B> {
+    pub(crate) backend: &'a mut B,
+    pub(crate) layout: &'a Layout,
+    pub(crate) seen: &'a mut [bool],
+    pub(crate) block_marks: &'a mut [usize],
+    pub(crate) columns: &'a mut Vec<usize>,
+    pub(crate) emission: usize,
+    pub(crate) allowed: Range<usize>,
+    pub(crate) next_expected: usize,
+    pub(crate) active: Option<usize>,
+    pub(crate) failed: bool,
 }
 
 impl<R: Real, B: LeastSquaresBackend<Scalar = R>> LinearizationSink for CheckedSink<'_, B> {

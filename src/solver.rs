@@ -2,6 +2,7 @@ use crate::{
     BatchKey, BlockId, DenseNormalCholesky, Factor, FactorBatch, FactorKey, GaussNewton, KeyError,
     OptimizeOptions, OptimizeReport, Real, SolverError, StateKey, StateStore, Variable,
     factors::{FactorSchema, FactorStore},
+    marginalization::{MarginalizationOptions, MarginalizationReport, Marginalizer, Priors},
     optimization::Optimizer,
     states::{StateSchema, StateVisitor},
     storage::{BatchPool, FactorPool, PoolAccess, StatePool},
@@ -15,11 +16,13 @@ use crate::{
 /// Created from [`states!`](crate::states!) and [`factors!`](crate::factors!)
 /// declarations. Storage, checked graph insertion, factor costs, and removal work.
 /// Dense full-step Gauss–Newton is available through [`optimize`](Self::optimize).
-/// Marginalization remains an API stub; see the [crate status](crate#status).
+/// Bulk square-root marginalization replaces incident factors with internal priors.
 pub struct Solver<S: StateSchema, F> {
     states: S,
     factors: F,
     optimizer: GaussNewton<DenseNormalCholesky<S::Scalar>>,
+    priors: Priors<S::Scalar>,
+    marginalizer: Marginalizer<S::Scalar>,
 }
 
 impl<S, F> Solver<S, F>
@@ -33,6 +36,8 @@ where
             states: S::default(),
             factors: F::default(),
             optimizer: GaussNewton::default(),
+            priors: Priors::default(),
+            marginalizer: Marginalizer::default(),
         }
     }
 
@@ -78,6 +83,16 @@ where
         F: PoolAccess<BatchPool<B, B::Factor>>,
     {
         self.factors.pool_mut().insert_batch(model)
+    }
+
+    /// Retire an empty batch, invalidating its handle and releasing its model.
+    /// Nonempty batches are rejected without removing any observations.
+    pub fn remove_batch<B>(&mut self, batch: BatchKey<B>) -> Result<(), SolverError>
+    where
+        B: FactorBatch<S, Scalar = S::Scalar>,
+        F: PoolAccess<BatchPool<B, B::Factor>>,
+    {
+        self.factors.pool_mut().remove_empty(batch)
     }
 
     /// Add a factor to a batch, validating the batch and all shared/local dependencies.
@@ -130,6 +145,7 @@ where
         self.optimizer.optimize(
             &mut self.states,
             &mut self.factors,
+            &mut self.priors,
             &OptimizeOptions::default(),
         )
     }
@@ -157,22 +173,51 @@ where
         method: &mut O,
         options: &OptimizeOptions<S::Scalar>,
     ) -> Result<OptimizeReport<S::Scalar>, SolverError> {
-        method.optimize(&mut self.states, &mut self.factors, options)
+        method.optimize(
+            &mut self.states,
+            &mut self.factors,
+            &mut self.priors,
+            options,
+        )
     }
 
-    /// Eliminate one variable and replace its incident factors with an internal prior.
+    /// Jointly eliminate the supplied states using square-root QR.
     ///
-    /// Only absorbed factors are removed, including within batches. Marginal
-    /// priors require no user registration. The variable's old handle becomes stale.
-    /// Manifold prior coordinates and heterogeneous bulk selection remain undesigned.
-    pub fn marginalize<T: Variable<Scalar = S::Scalar>>(
+    /// The caller selects identities with [`StateKey::block_id`]; no age or budget
+    /// policy is imposed. Duplicates are ignored and an empty selection is a no-op.
+    /// Linearizes at the current estimates without optimizing first. Only incident
+    /// factors (including individual batch payloads and old priors) are absorbed.
+    /// Their replacement is exact for the linearized objective, up to rank tolerance.
+    ///
+    /// Internal priors use fixed Lie-group references and need no schema registration.
+    /// Removed state/factor handles become stale; surviving handles remain valid.
+    /// Errors during validation or evaluation leave the graph unchanged. Empty
+    /// batches remain reusable until explicitly retired with [`Self::remove_batch`].
+    pub fn marginalize(
         &mut self,
-        _variable: StateKey<T>,
-    ) -> Result<(), SolverError>
-    where
-        S: PoolAccess<StatePool<T>>,
-    {
-        todo!("API only: variable marginalization")
+        variables: &[BlockId],
+    ) -> Result<MarginalizationReport, SolverError> {
+        self.marginalize_with(variables, &MarginalizationOptions::default())
+    }
+
+    /// Marginalize with explicit numerical rank controls.
+    ///
+    /// QR acts directly on Jacobian rows; no normal equations or damping are used.
+    /// Rank deficiency is supported, but no nonlinear observability/FEJ policy is
+    /// imposed. Use LSMR for optimization if normal equations must also be avoided
+    /// in the nonlinear solve; [`Self::optimize`] still defaults to Cholesky.
+    pub fn marginalize_with(
+        &mut self,
+        variables: &[BlockId],
+        options: &MarginalizationOptions<S::Scalar>,
+    ) -> Result<MarginalizationReport, SolverError> {
+        self.marginalizer.run(
+            &mut self.states,
+            &mut self.factors,
+            &mut self.priors,
+            variables,
+            options,
+        )
     }
 }
 

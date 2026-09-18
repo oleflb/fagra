@@ -163,9 +163,12 @@ The dense Cholesky backend lives separately in `src/normal.rs`.
 `Solver<S, F>` owns the graph and a retained default
 `GaussNewton<DenseNormalCholesky<S::Scalar>>` instance.
 `optimize_with` accepts a caller-owned method and stopping controls. The hidden
-`Optimizer<S, F>` interface separates nonlinear orchestration from graph ownership.
-`LeastSquaresBackend` consumes validated residual/Jacobian emissions and resolved
-column offsets, supplies a gradient norm, and returns a borrowed solution slice.
+`Optimizer<S, F>` interface receives states, factors, and solver-owned marginal
+priors, separating nonlinear orchestration from graph ownership.
+`LeastSquaresBackend` consumes residual slices and a clonable iterator of
+`(column offset, Jacobian view)` pairs, supplies a gradient norm, and returns a
+borrowed solution slice. Runtime row counts support marginal priors without
+weakening the public factor API's compile-time dimension checks.
 Its representation is unconstrained: QR can retain rows, while CG can use a matrix
 or block operator. LM will need regularization and model-prediction extensions;
 those methods and alternate algorithms are not implemented yet.
@@ -233,5 +236,57 @@ warmed optimization that performs actual steps, including a release workload wit
 to satisfy the end-to-end contract. Structural growth may allocate. Controls are
 documented on `OptimizeOptions`; failures preserve previously accepted iterations.
 
-Marginalization's manifold-coordinate contract and heterogeneous bulk API remain
-open; `marginalize()` is still a stub. There is no incremental relinearization cache.
+## Square-root marginalization
+
+`Solver::marginalize(&[BlockId])` jointly removes exactly the caller-selected
+states. IDs come from `StateKey::block_id`, so a selection can contain different
+variable types. Duplicates are ignored; empty selections do nothing. Invalid
+keys and numerical/evaluation errors leave the graph unchanged.
+
+The solver collects only incident factors and incident old marginal priors.
+Retained-only factors are not absorbed. Batch payloads are temporarily packed
+into a contiguous selection, allowing one shared linearization per affected
+batch. A guard restores payload order on success, error, or evaluator panic;
+surviving handles retain their identities. After numerical work succeeds, the
+solver publishes the replacement prior and removes absorbed factors and states.
+As with other storage edits, user destructors must not panic during publication.
+Empty batch models remain alive until `remove_batch` explicitly retires them.
+
+For the whitened model `Jm * dm + Js * ds + r`, column-pivoted Householder QR
+factorizes only `Jm` and transforms `[Js | r]`. Rows below the numerical rank form
+the reduced objective. A second QR compresses those rows to at most the separator
+dimension; retained-column permutations are undone when storing the prior.
+Neither pass forms normal equations, explicit inverses, or an explicit Q.
+Rank is chosen relative to the first pivot, with default tolerance
+`epsilon * max(residual_rows, eliminated_dof, 1)`. Coordinate units affect this
+decision; callers can override the tolerance. Exact zero blocks bypass faer
+0.24's zero-norm normalization. Rank truncation is a numerical approximation.
+
+A prior stores `A`, `b`, and typed reference inverses in the state pools:
+
+```text
+d_i = Log(reference_i.inverse() * x_i)
+residual = b + sum(A_i * d_i)
+Jacobian_i = A_i * Jr_inverse(d_i)
+```
+
+References require no `Clone` or type-erased state dispatch. Every optimization
+backend includes these priors in accepted/trial costs and linearizations.
+Absorbed priors are evaluated at current estimates before subsequent elimination;
+their old references are released. This is a frozen nonlinear approximation,
+not an FEJ/observability-consistency policy. It is exact for linear problems up
+to numerical rank decisions and floating-point roundoff.
+
+Residual-only cost is accumulated separately. Reports include it, while relative
+cost stopping excludes it so old irreducible cost does not mask active progress.
+The default optimizer still uses normal equations; use LSMR to avoid them during
+optimization as well as marginalization.
+
+The first implementation scans graph metadata and forms one dense affected front.
+For `m` incident residual rows and `n` affected coordinates, assembly uses O(mn)
+storage; separator storage is O(s²). Numerical QR buffers retain capacity,
+but structural planning, replacement priors, and reference capture allocate.
+
+There is no incidence index, sparse-front
+ordering, or incremental relinearization cache. Those are the next performance
+steps for large windows; elapsed history is not retained as raw factors.
