@@ -109,6 +109,11 @@ Identity and signed tiny increments along each axis are mandatory cases for
 the derivative checks. Rejecting one of those cases is a failure: the local
 chart must be smooth around identity.
 
+Each property generates only its required inputs: coordinates use increments;
+group laws use three states; exp/log uses one state and an increment; the other
+properties use two states and an increment. Fixed identity/zero assertions run
+once per property rather than being repeated for every random case.
+
 ## What gets tested
 
 Each macro invocation generates six ordinary tests:
@@ -165,7 +170,7 @@ fn tolerance() -> fagra::testing::Tolerance {
 Failures identify the property, operation, and matrix entry and report the
 shrunk case. Proptest normally persists regression seeds beside the test source.
 Keep those regressions to reproduce failures. For a custom test, call
-`testing::check::<YourVariable>(testing::Property::Jacobians)` directly.
+`testing::check_variable::<YourVariable>(testing::VariableProperty::Jacobians)` directly.
 
 These checks establish consistency over the tested domain, not mathematical
 proof or agreement with a physical model. Keep independent reference cases,

@@ -5,7 +5,7 @@ use faer_ext::nalgebra::{
 };
 use fagra::testing::num_dual::{Dual32, Dual64};
 use fagra::testing::{
-    self, Property, TestScalar, TestVariable, Tolerance,
+    self, TestScalar, TestVariable, Tolerance, VariableProperty,
     proptest::{prelude::*, test_runner::Config},
 };
 use fagra::{Jacobian, Tangent, Variable};
@@ -199,8 +199,8 @@ impl<const KIND: u8> TestVariable for Broken<f64, KIND> {
 
 #[test]
 fn incorrect_implementations_are_rejected() {
-    fn rejected<T: TestVariable>(property: Property, expected: &str) {
-        let failure = std::panic::catch_unwind(|| testing::check::<T>(property))
+    fn rejected<T: TestVariable>(property: VariableProperty, expected: &str) {
+        let failure = std::panic::catch_unwind(|| testing::check_variable::<T>(property))
             .expect_err("broken variable passed");
         let message = failure
             .downcast_ref::<String>()
@@ -209,13 +209,13 @@ fn incorrect_implementations_are_rejected() {
             .unwrap_or("");
         assert!(message.contains(expected), "unexpected failure: {message}");
     }
-    rejected::<Broken<f64, 1>>(Property::Jacobians, "adjoint derivative");
-    rejected::<Broken<f64, 2>>(Property::Jacobians, "Exp derivative");
-    rejected::<Broken<f64, 3>>(Property::Jacobians, "Exp derivative");
-    rejected::<Broken<f64, 4>>(Property::GroupLaws, "left inverse");
+    rejected::<Broken<f64, 1>>(VariableProperty::Jacobians, "adjoint derivative");
+    rejected::<Broken<f64, 2>>(VariableProperty::Jacobians, "Exp derivative");
+    rejected::<Broken<f64, 3>>(VariableProperty::Jacobians, "Exp derivative");
+    rejected::<Broken<f64, 4>>(VariableProperty::GroupLaws, "left inverse");
     // A domain predicate cannot hide bad group laws or pass by rejecting every random case.
-    testing::check::<Broken<f64, 5>>(Property::GroupLaws);
-    rejected::<Broken<f64, 5>>(Property::ExpLog, "Too many global rejects");
+    testing::check_variable::<Broken<f64, 5>>(VariableProperty::GroupLaws);
+    rejected::<Broken<f64, 5>>(VariableProperty::ExpLog, "Too many global rejects");
 }
 
 #[test]

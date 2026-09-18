@@ -22,7 +22,7 @@ use std::{fmt::Debug, panic::Location};
 use faer_ext::nalgebra::{DMatrix, DVector, DimName, RealField};
 use proptest::{
     prelude::*,
-    test_runner::{TestCaseError, TestCaseResult, TestRunner},
+    test_runner::{Config, TestCaseError, TestCaseResult, TestRunner},
 };
 
 use crate::{Jacobian, Tangent, Variable};
@@ -165,7 +165,7 @@ pub trait TestVariable: Variable<Scalar: TestScalar> + Debug {
 
 /// Independently runnable groups of variable properties.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Property {
+pub enum VariableProperty {
     /// Tangent slice conversion and invalid-length rejection.
     Coordinates,
     /// Identity, inverse, and associativity, without log-chart filtering.
@@ -180,12 +180,20 @@ pub enum Property {
     Jacobians,
 }
 
-#[derive(Debug)]
-struct Case<T: TestVariable> {
-    x: T,
-    y: T,
-    z: T,
-    delta: Tangent<T>,
+#[track_caller]
+fn runner(mut config: Config, t: Tolerance) -> TestRunner {
+    assert!(
+        config.cases > 0,
+        "property tests require a nonzero case count"
+    );
+    assert!(
+        [t.absolute, t.relative]
+            .iter()
+            .all(|x| x.is_finite() && *x >= 0.0),
+        "invalid property-test tolerance"
+    );
+    config.source_file.get_or_insert(Location::caller().file());
+    TestRunner::new(config)
 }
 
 fn tangent<T: Variable<Scalar: TestScalar>>(values: &[f64]) -> Tangent<T> {
@@ -280,111 +288,101 @@ fn smooth<T: TestVariable>(value: &T) -> TestCaseResult {
     }
 }
 
-fn properties<T: TestVariable>(property: Property, case: &Case<T>, t: Tolerance) -> TestCaseResult {
-    let Case { x, y, z, delta } = case;
-    let zero = tangent::<T>(&vec![0.0; T::Dim::DIM]);
+fn coordinates<T: TestVariable>(delta: &Tangent<T>, t: Tolerance) -> TestCaseResult {
+    vector::<T>(
+        t,
+        "coordinate round trip",
+        &T::tangent_from_slice(delta.as_slice()),
+        delta,
+    )
+}
+
+fn group_laws<T: TestVariable>(x: &T, y: &T, z: &T, t: Tolerance) -> TestCaseResult {
     let id = T::identity();
-    match property {
-        Property::Coordinates => {
-            vector::<T>(
-                t,
-                "coordinate round trip",
-                &T::tangent_from_slice(delta.as_slice()),
-                delta,
-            )?;
-        }
-        Property::GroupLaws => {
-            state(t, "left identity", &id.compose(x), x)?;
-            state(t, "right identity", &x.compose(&id), x)?;
-            state(t, "left inverse", &x.inverse().compose(x), &id)?;
-            state(t, "right inverse", &x.compose(&x.inverse()), &id)?;
-            state(t, "double inverse", &x.inverse().inverse(), x)?;
-            state(
-                t,
-                "associativity",
-                &x.compose(y).compose(z),
-                &x.compose(&y.compose(z)),
-            )?;
-            state(
-                t,
-                "product inverse",
-                &x.compose(y).inverse(),
-                &y.inverse().compose(&x.inverse()),
-            )?;
-        }
-        Property::ExpLog => {
-            smooth(x)?;
-            smooth(y)?;
-            smooth(z)?;
-            let exp = T::exp(delta);
-            smooth(&exp)?;
-            state(t, "Exp(0)", &T::exp(&zero), &id)?;
-            vector::<T>(t, "Log(identity)", &id.log(), &zero)?;
-            vector::<T>(t, "Log(Exp(delta))", &exp.log(), delta)?;
-            for value in [x, y, z] {
-                let log = value.log();
-                state(t, "Exp(Log(x))", &T::exp(&log), value)?;
-                let dual_log = value.to_dual().log();
-                for i in 0..T::Dim::DIM {
-                    let (primal, derivative) = T::Scalar::parts(dual_log[i]);
-                    near(t, "lift/log value", primal, log[i].test_value())?;
-                    near(t, "lift/log unseeded derivative", derivative, 0.0)?;
-                }
-            }
-        }
-        Property::RetractLocal => {
-            smooth(&x.inverse().compose(y))?;
-            smooth(&T::exp(delta))?;
-            state(t, "zero retraction", &x.retract(&zero), x)?;
-            state(
-                t,
-                "right retraction",
-                &x.retract(delta),
-                &x.compose(&T::exp(delta)),
-            )?;
-            vector::<T>(t, "local(x,x)", &x.local(x), &zero)?;
-            vector::<T>(
-                t,
-                "local convention",
-                &x.local(y),
-                &x.inverse().compose(y).log(),
-            )?;
-            vector::<T>(
-                t,
-                "local(retract(delta))",
-                &x.local(&x.retract(delta)),
-                delta,
-            )?;
-            state(t, "retract(local(y))", &x.retract(&x.local(y)), y)?;
-        }
-        Property::Adjoint => {
-            let ax = coefficients::<T>(&x.adjoint());
-            let ay = coefficients::<T>(&y.adjoint());
-            matrix(
-                t,
-                "Ad(identity)",
-                &coefficients::<T>(&id.adjoint()),
-                &DMatrix::identity(T::Dim::DIM, T::Dim::DIM),
-            )?;
-            matrix(
-                t,
-                "Ad(x*y)",
-                &coefficients::<T>(&x.compose(y).adjoint()),
-                &(&ax * ay),
-            )?;
-            let coordinates =
-                DVector::from_iterator(delta.len(), delta.iter().map(|v| v.test_value()));
-            let transformed = tangent::<T>((&ax * coordinates).as_slice());
-            state(
-                t,
-                "adjoint conjugation",
-                &x.compose(&T::exp(delta)).compose(&x.inverse()),
-                &T::exp(&transformed),
-            )?;
-        }
-        Property::Jacobians => jacobians(case, t)?,
+    state(t, "left identity", &id.compose(x), x)?;
+    state(t, "right identity", &x.compose(&id), x)?;
+    state(t, "left inverse", &x.inverse().compose(x), &id)?;
+    state(t, "right inverse", &x.compose(&x.inverse()), &id)?;
+    state(t, "double inverse", &x.inverse().inverse(), x)?;
+    state(
+        t,
+        "associativity",
+        &x.compose(y).compose(z),
+        &x.compose(&y.compose(z)),
+    )?;
+    state(
+        t,
+        "product inverse",
+        &x.compose(y).inverse(),
+        &y.inverse().compose(&x.inverse()),
+    )
+}
+
+fn exp_log<T: TestVariable>(x: &T, delta: &Tangent<T>, t: Tolerance) -> TestCaseResult {
+    smooth(x)?;
+    let exp = T::exp(delta);
+    smooth(&exp)?;
+    vector::<T>(t, "Log(Exp(delta))", &exp.log(), delta)?;
+    let log = x.log();
+    state(t, "Exp(Log(x))", &T::exp(&log), x)?;
+    let dual_log = x.to_dual().log();
+    for i in 0..T::Dim::DIM {
+        let (primal, derivative) = T::Scalar::parts(dual_log[i]);
+        near(t, "lift/log value", primal, log[i].test_value())?;
+        near(t, "lift/log unseeded derivative", derivative, 0.0)?;
     }
     Ok(())
+}
+
+fn retract_local<T: TestVariable>(
+    x: &T,
+    y: &T,
+    delta: &Tangent<T>,
+    t: Tolerance,
+) -> TestCaseResult {
+    smooth(&x.inverse().compose(y))?;
+    smooth(&T::exp(delta))?;
+    let zero = tangent::<T>(&vec![0.0; T::Dim::DIM]);
+    state(t, "zero retraction", &x.retract(&zero), x)?;
+    state(
+        t,
+        "right retraction",
+        &x.retract(delta),
+        &x.compose(&T::exp(delta)),
+    )?;
+    vector::<T>(t, "local(x,x)", &x.local(x), &zero)?;
+    vector::<T>(
+        t,
+        "local convention",
+        &x.local(y),
+        &x.inverse().compose(y).log(),
+    )?;
+    vector::<T>(
+        t,
+        "local(retract(delta))",
+        &x.local(&x.retract(delta)),
+        delta,
+    )?;
+    state(t, "retract(local(y))", &x.retract(&x.local(y)), y)
+}
+
+fn adjoint<T: TestVariable>(x: &T, y: &T, delta: &Tangent<T>, t: Tolerance) -> TestCaseResult {
+    let ax = coefficients::<T>(&x.adjoint());
+    let ay = coefficients::<T>(&y.adjoint());
+    matrix(
+        t,
+        "Ad(x*y)",
+        &coefficients::<T>(&x.compose(y).adjoint()),
+        &(&ax * ay),
+    )?;
+    let coordinates = DVector::from_iterator(delta.len(), delta.iter().map(|v| v.test_value()));
+    let transformed = tangent::<T>((&ax * coordinates).as_slice());
+    state(
+        t,
+        "adjoint conjugation",
+        &x.compose(&T::exp(delta)).compose(&x.inverse()),
+        &T::exp(&transformed),
+    )
 }
 
 fn derivative<T: TestVariable>(
@@ -435,8 +433,7 @@ fn output_chart<T: TestVariable>(output: T) -> impl Fn(T::Dual) -> Tangent<T::Du
     move |value| inverse.compose(&value).log()
 }
 
-fn jacobians<T: TestVariable>(case: &Case<T>, t: Tolerance) -> TestCaseResult {
-    let Case { x, y, delta, .. } = case;
+fn jacobians<T: TestVariable>(x: &T, y: &T, delta: &Tangent<T>, t: Tolerance) -> TestCaseResult {
     smooth(x)?;
     smooth(&x.inverse().compose(y))?;
     let exp = T::exp(delta);
@@ -445,18 +442,6 @@ fn jacobians<T: TestVariable>(case: &Case<T>, t: Tolerance) -> TestCaseResult {
     let jr = coefficients::<T>(&T::right_jacobian(delta));
     let inverse = coefficients::<T>(&T::right_jacobian_inverse(delta));
     let identity = DMatrix::identity(T::Dim::DIM, T::Dim::DIM);
-    matrix(
-        t,
-        "Jr(0)",
-        &coefficients::<T>(&T::right_jacobian(&zero)),
-        &identity,
-    )?;
-    matrix(
-        t,
-        "Jr_inverse(0)",
-        &coefficients::<T>(&T::right_jacobian_inverse(&zero)),
-        &identity,
-    )?;
     matrix(t, "Jr * Jr_inverse", &(&jr * &inverse), &identity)?;
     let dx = x.to_dual();
     let dy = y.to_dual();
@@ -511,66 +496,115 @@ fn jacobians<T: TestVariable>(case: &Case<T>, t: Tolerance) -> TestCaseResult {
 /// Run one property group, panicking with a shrunk counterexample on failure.
 ///
 /// Called by [`crate::variable_tests!`], or directly from a custom `#[test]`.
-/// Identity is always checked. Jacobian tests also check signed tiny increments
-/// along every coordinate. Those fixed cases cannot be rejected by a domain
-/// predicate. Random cases use proptest's shrinking and bounded rejection.
+/// Zero coordinates or identity are always checked. Jacobian tests also check
+/// signed tiny increments along every coordinate. Those fixed cases cannot be
+/// rejected by a domain predicate. Each property generates only its required
+/// inputs, using proptest's shrinking and bounded rejection.
 #[track_caller]
-pub fn check<T: TestVariable>(property: Property) {
-    let mut config = T::config();
+pub fn check_variable<T: TestVariable>(property: VariableProperty) {
     let t = T::tolerance();
-    assert!(
-        config.cases > 0,
-        "property tests require a nonzero case count"
-    );
-    assert!(
-        [t.absolute, t.relative]
-            .iter()
-            .all(|x| x.is_finite() && *x >= 0.0),
-        "invalid property-test tolerance"
-    );
-    if config.source_file.is_none() {
-        config.source_file = Some(Location::caller().file());
-    }
-    let mut fixed = Case::<T> {
-        x: T::identity(),
-        y: T::identity(),
-        z: T::identity(),
-        delta: tangent::<T>(&vec![0.0; T::Dim::DIM]),
+    let mut runner = runner(T::config(), t);
+    let fixed = |result: TestCaseResult| {
+        result.unwrap_or_else(|e| panic!("{property:?} at identity/zero: {e:?}"));
     };
-    properties(property, &fixed, t).unwrap_or_else(|e| panic!("{property:?} at identity: {e:?}"));
-    if property == Property::Coordinates {
-        for (label, length) in [
-            ("long", Some(T::Dim::DIM + 1)),
-            ("short", T::Dim::DIM.checked_sub(1)),
-        ] {
-            let Some(length) = length else { continue };
-            let coordinates = vec![T::Scalar::from_test_value(0.0); length];
-            assert!(
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| T::tangent_from_slice(
-                    &coordinates
-                )))
-                .is_err(),
-                "{label} tangent slice was accepted"
-            );
-        }
-    }
-    if property == Property::Jacobians {
-        for axis in 0..T::Dim::DIM {
-            for sign in [-1.0, 1.0] {
-                let mut coordinates = vec![0.0; T::Dim::DIM];
-                coordinates[axis] = sign * 1e-7;
-                fixed.delta = tangent::<T>(&coordinates);
-                properties(property, &fixed, t).unwrap_or_else(|e| {
-                    panic!("{property:?} at tiny increment {coordinates:?}: {e:?}")
-                });
+    let result = match property {
+        VariableProperty::Coordinates => {
+            fixed(coordinates::<T>(&tangent::<T>(&vec![0.0; T::Dim::DIM]), t));
+            for (label, length) in [
+                ("long", Some(T::Dim::DIM + 1)),
+                ("short", T::Dim::DIM.checked_sub(1)),
+            ] {
+                let Some(length) = length else { continue };
+                let coordinates = vec![T::Scalar::from_test_value(0.0); length];
+                assert!(
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        T::tangent_from_slice(&coordinates)
+                    }))
+                    .is_err(),
+                    "{label} tangent slice was accepted"
+                );
             }
+            runner
+                .run(&T::increments(), |delta| coordinates::<T>(&delta, t))
+                .map_err(|e| e.to_string())
         }
-    }
-    let cases = (T::states(), T::states(), T::states(), T::increments())
-        .prop_map(|(x, y, z, delta)| Case::<T> { x, y, z, delta });
-    TestRunner::new(config)
-        .run(&cases, |case| properties(property, &case, t))
-        .unwrap_or_else(|e| panic!("{}::{property:?}: {e}", std::any::type_name::<T>()));
+        VariableProperty::GroupLaws => {
+            let id = T::identity();
+            fixed(group_laws(&id, &id, &id, t));
+            runner
+                .run(&(T::states(), T::states(), T::states()), |(x, y, z)| {
+                    group_laws(&x, &y, &z, t)
+                })
+                .map_err(|e| e.to_string())
+        }
+        VariableProperty::ExpLog => {
+            let id = T::identity();
+            let zero = tangent::<T>(&vec![0.0; T::Dim::DIM]);
+            fixed(state(t, "Exp(0)", &T::exp(&zero), &id));
+            fixed(vector::<T>(t, "Log(identity)", &id.log(), &zero));
+            fixed(exp_log(&id, &zero, t));
+            runner
+                .run(&(T::states(), T::increments()), |(x, delta)| {
+                    exp_log(&x, &delta, t)
+                })
+                .map_err(|e| e.to_string())
+        }
+        VariableProperty::RetractLocal
+        | VariableProperty::Adjoint
+        | VariableProperty::Jacobians => {
+            let id = T::identity();
+            let zero = tangent::<T>(&vec![0.0; T::Dim::DIM]);
+            let evaluate = match property {
+                VariableProperty::RetractLocal => retract_local::<T>,
+                VariableProperty::Adjoint => {
+                    let identity = DMatrix::identity(T::Dim::DIM, T::Dim::DIM);
+                    fixed(matrix(
+                        t,
+                        "Ad(identity)",
+                        &coefficients::<T>(&id.adjoint()),
+                        &identity,
+                    ));
+                    adjoint::<T>
+                }
+                VariableProperty::Jacobians => {
+                    let identity = DMatrix::identity(T::Dim::DIM, T::Dim::DIM);
+                    fixed(matrix(
+                        t,
+                        "Jr(0)",
+                        &coefficients::<T>(&T::right_jacobian(&zero)),
+                        &identity,
+                    ));
+                    fixed(matrix(
+                        t,
+                        "Jr_inverse(0)",
+                        &coefficients::<T>(&T::right_jacobian_inverse(&zero)),
+                        &identity,
+                    ));
+                    jacobians::<T>
+                }
+                _ => unreachable!(),
+            };
+            fixed(evaluate(&id, &id, &zero, t));
+            if property == VariableProperty::Jacobians {
+                for axis in 0..T::Dim::DIM {
+                    for sign in [-1.0, 1.0] {
+                        let mut coordinates = vec![0.0; T::Dim::DIM];
+                        coordinates[axis] = sign * 1e-7;
+                        evaluate(&id, &id, &tangent::<T>(&coordinates), t).unwrap_or_else(|e| {
+                            panic!("{property:?} at tiny increment {coordinates:?}: {e:?}")
+                        });
+                    }
+                }
+            }
+            runner
+                .run(
+                    &(T::states(), T::states(), T::increments()),
+                    |(x, y, delta)| evaluate(&x, &y, &delta, t),
+                )
+                .map_err(|e| e.to_string())
+        }
+    };
+    result.unwrap_or_else(|e| panic!("{}::{property:?}: {e}", std::any::type_name::<T>()));
 }
 
 /// Register property tests for a type implementing [`TestVariable`](crate::testing::TestVariable).
@@ -593,27 +627,39 @@ macro_rules! variable_tests {
             use super::*;
             #[test]
             fn coordinates() {
-                $crate::testing::check::<$variable>($crate::testing::Property::Coordinates);
+                $crate::testing::check_variable::<$variable>(
+                    $crate::testing::VariableProperty::Coordinates,
+                );
             }
             #[test]
             fn group_laws() {
-                $crate::testing::check::<$variable>($crate::testing::Property::GroupLaws);
+                $crate::testing::check_variable::<$variable>(
+                    $crate::testing::VariableProperty::GroupLaws,
+                );
             }
             #[test]
             fn exp_log() {
-                $crate::testing::check::<$variable>($crate::testing::Property::ExpLog);
+                $crate::testing::check_variable::<$variable>(
+                    $crate::testing::VariableProperty::ExpLog,
+                );
             }
             #[test]
             fn retract_local() {
-                $crate::testing::check::<$variable>($crate::testing::Property::RetractLocal);
+                $crate::testing::check_variable::<$variable>(
+                    $crate::testing::VariableProperty::RetractLocal,
+                );
             }
             #[test]
             fn adjoint() {
-                $crate::testing::check::<$variable>($crate::testing::Property::Adjoint);
+                $crate::testing::check_variable::<$variable>(
+                    $crate::testing::VariableProperty::Adjoint,
+                );
             }
             #[test]
             fn jacobians() {
-                $crate::testing::check::<$variable>($crate::testing::Property::Jacobians);
+                $crate::testing::check_variable::<$variable>(
+                    $crate::testing::VariableProperty::Jacobians,
+                );
             }
         }
     };
