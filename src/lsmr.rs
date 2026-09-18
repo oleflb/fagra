@@ -3,10 +3,10 @@ use faer::{
     dyn_stack::{MemBuffer, MemStack, StackReq},
     matrix_free::{BiLinOp, IdentityPrecond, InitialGuessStatus, LinOp, lsmr},
 };
-use faer_ext::nalgebra::{DimName, Matrix, Storage, U1, storage::IsContiguous};
+use faer_ext::nalgebra::{DMatrixView, Dyn};
 
 use crate::{
-    EvaluationError, JacobianBlock, Real, SolverError,
+    EvaluationError, Real, SolverError,
     optimization::{LeastSquaresBackend, norm_inf},
 };
 
@@ -162,33 +162,28 @@ impl<R: Real> LeastSquaresBackend for Lsmr<R> {
         self.gradient.fill(R::zero());
     }
 
-    fn accumulate<Rows: DimName, S>(
+    fn accumulate<'a>(
         &mut self,
-        residual: &Matrix<R, Rows, U1, S>,
-        jacobians: &[JacobianBlock<'_, R>],
-        columns: &[usize],
-    ) -> Result<(), EvaluationError>
-    where
-        S: Storage<R, Rows, U1> + IsContiguous,
-    {
+        residual: &[R],
+        jacobians: impl Iterator<Item = (usize, DMatrixView<'a, R, Dyn, Dyn>)> + Clone,
+    ) -> Result<(), EvaluationError> {
         let row = self.jacobian.rows;
         self.jacobian.rows = row
-            .checked_add(Rows::DIM)
+            .checked_add(residual.len())
             .ok_or(EvaluationError::DimensionMismatch)?;
         self.rhs.extend(residual.iter().map(|&r| -r));
-        for (block, &col) in jacobians.iter().zip(columns) {
-            let matrix = block.jacobian();
+        for (col, matrix) in jacobians {
             self.jacobian.blocks.push(Block {
                 row,
                 col,
-                rows: Rows::DIM,
+                rows: residual.len(),
                 cols: matrix.ncols(),
                 start: self.jacobian.values.len(),
             });
             // Pack explicitly: emitted views may have arbitrary strides.
             for j in 0..matrix.ncols() {
                 let mut gradient = R::zero();
-                for i in 0..Rows::DIM {
+                for i in 0..residual.len() {
                     let value = matrix[(i, j)];
                     self.jacobian.values.push(value);
                     gradient += value * residual[i];
@@ -247,7 +242,7 @@ impl<R: Real> LeastSquaresBackend for Lsmr<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DenseNormalCholesky, Variable, storage::StatePool};
+    use crate::{DenseNormalCholesky, JacobianBlock, Variable, storage::StatePool};
     use faer::Mat;
     use faer_ext::nalgebra::{SMatrix, SVector};
 
@@ -262,10 +257,13 @@ mod tests {
             solver.prepare(n).unwrap();
             solver.clear();
             for col in (0..n).step_by(2) {
-                let key = states.insert(Pair::identity());
+                let _key = states.insert(Pair::identity());
                 let residual = SVector::<f64, 2>::new(-(col as f64), -(col as f64 + 1.0));
                 solver
-                    .accumulate(&residual, &[JacobianBlock::new(key, &jacobian)], &[col])
+                    .accumulate(
+                        residual.as_slice(),
+                        std::iter::once((col, jacobian.as_view())),
+                    )
                     .unwrap();
             }
             for (i, &value) in solver.solve().unwrap().iter().enumerate() {
@@ -297,13 +295,27 @@ mod tests {
                 let jb = SMatrix::<f64, 3, 2>::from_row_slice(&[1., 0., 0., 2., 3., -1.]);
                 let blocks = [JacobianBlock::new(a, &ja), JacobianBlock::new(b, &jb)];
                 let r = SVector::<f64, 3>::new(1., -2., 3.);
-                solver.accumulate(&r, &blocks, &[2, 0]).unwrap();
-                dense.accumulate(&r, &blocks, &[2, 0]).unwrap();
+                solver
+                    .accumulate(
+                        r.as_slice(),
+                        blocks.iter().zip([2, 0]).map(|(b, c)| (c, b.jacobian())),
+                    )
+                    .unwrap();
+                dense
+                    .accumulate(
+                        r.as_slice(),
+                        blocks.iter().zip([2, 0]).map(|(b, c)| (c, b.jacobian())),
+                    )
+                    .unwrap();
                 let jb = SMatrix::<f64, 2, 2>::new(2., 0., 0., 1.);
                 let r = SVector::<f64, 2>::new(-4., 5.);
                 let blocks = [JacobianBlock::new(b, &jb)];
-                solver.accumulate(&r, &blocks, &[0]).unwrap();
-                dense.accumulate(&r, &blocks, &[0]).unwrap();
+                solver
+                    .accumulate(r.as_slice(), blocks.iter().map(|b| (0, b.jacobian())))
+                    .unwrap();
+                dense
+                    .accumulate(r.as_slice(), blocks.iter().map(|b| (0, b.jacobian())))
+                    .unwrap();
             }
             let j = faer::mat![
                 [1., 0., 5., 6.],

@@ -11,11 +11,11 @@ use faer::{
 };
 use faer_ext::{
     IntoFaer,
-    nalgebra::{DimName, Matrix, Storage, U1, storage::IsContiguous},
+    nalgebra::{DMatrixView, Dyn},
 };
 
 use crate::{
-    EvaluationError, JacobianBlock, Real, SolverError,
+    EvaluationError, Real, SolverError,
     optimization::{LeastSquaresBackend, norm_inf},
 };
 
@@ -82,23 +82,18 @@ impl<R: Real> LeastSquaresBackend for DenseNormalCholesky<R> {
         self.rhs.fill(R::zero());
     }
 
-    fn accumulate<Rows: DimName, S>(
+    fn accumulate<'a>(
         &mut self,
-        residual: &Matrix<R, Rows, U1, S>,
-        jacobians: &[JacobianBlock<'_, R>],
-        columns: &[usize],
-    ) -> Result<(), EvaluationError>
-    where
-        S: Storage<R, Rows, U1> + IsContiguous,
-    {
-        let residual = MatRef::from_column_major_slice(residual.as_slice(), Rows::DIM, 1);
-        for (i, block) in jacobians.iter().enumerate() {
-            let left: MatRef<'_, R> = block.jacobian().into_faer();
+        residual: &[R],
+        jacobians: impl Iterator<Item = (usize, DMatrixView<'a, R, Dyn, Dyn>)> + Clone,
+    ) -> Result<(), EvaluationError> {
+        let residual = MatRef::from_column_major_slice(residual, residual.len(), 1);
+        for (i, (offset, block)) in jacobians.clone().enumerate() {
+            let left: MatRef<'_, R> = block.into_faer();
             let width = left.ncols();
             if width == 0 {
                 continue;
             }
-            let offset = columns[i];
             matmul(
                 MatMut::from_column_major_slice_mut(
                     &mut self.rhs[offset..offset + width],
@@ -124,17 +119,17 @@ impl<R: Real> LeastSquaresBackend for DenseNormalCholesky<R> {
                 R::one(),
                 Par::Seq,
             );
-            for j in 0..i {
-                let right: MatRef<'_, R> = jacobians[j].jacobian().into_faer();
+            for (other_offset, block) in jacobians.clone().take(i) {
+                let right: MatRef<'_, R> = block.into_faer();
                 if right.ncols() == 0 {
                     continue;
                 }
                 // Emission order need not match numerical ordering. Always
                 // write the lower block directly, without a mirrored product.
-                let (row, col, lhs, rhs) = if offset > columns[j] {
-                    (offset, columns[j], left, right)
+                let (row, col, lhs, rhs) = if offset > other_offset {
+                    (offset, other_offset, left, right)
                 } else {
-                    (columns[j], offset, right, left)
+                    (other_offset, offset, right, left)
                 };
                 matmul(
                     self.normal
@@ -189,15 +184,10 @@ impl<R: Real> LeastSquaresBackend for DenseNormalCholesky<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Variable, storage::StatePool};
     use faer_ext::nalgebra::{SMatrix, SVector};
-
-    type Pair = crate::variable::test_support::Vector<2>;
 
     #[test]
     fn lower_triangle_and_rhs_are_assembled_and_solved_in_place() {
-        let mut states = StatePool::default();
-        let key = states.insert(Pair::identity());
         let jacobian = SMatrix::<f64, 2, 2>::from_row_slice(&[1.0, 2.0, 3.0, 4.0]);
         let residual = SVector::<f64, 2>::new(-5.0, -11.0);
         let mut backend = DenseNormalCholesky::default();
@@ -210,7 +200,10 @@ mod tests {
             backend.clear();
             backend.normal[(0, 1)] = f64::NAN; // The upper triangle must never be used.
             backend
-                .accumulate(&residual, &[JacobianBlock::new(key, &jacobian)], &[0])
+                .accumulate(
+                    residual.as_slice(),
+                    std::iter::once((0, jacobian.as_view())),
+                )
                 .unwrap();
             assert_eq!(backend.normal[(0, 0)], 10.0);
             assert_eq!(backend.normal[(1, 0)], 14.0);

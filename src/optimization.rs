@@ -1,6 +1,6 @@
 use std::{collections::HashMap, convert::Infallible, ops::Range};
 
-use faer_ext::nalgebra::{DimName, Matrix, Storage, U1, storage::IsContiguous};
+use faer_ext::nalgebra::{DMatrixView, DimName, Dyn, Matrix, Storage, U1, storage::IsContiguous};
 
 use crate::{
     BlockId, EvaluationError, Factor, FactorBatch, FactorId, JacobianBlock, LinearizationSink,
@@ -115,16 +115,14 @@ pub trait LeastSquaresBackend {
     fn prepare(&mut self, dimension: usize) -> Result<(), SolverError>;
     /// Start a fresh linearization, discarding any previous factorization.
     fn clear(&mut self);
-    /// Consume validated residuals and Jacobians. Columns correspond one-to-one
-    /// with the Jacobian descriptors; repeated variable identities have been rejected.
-    fn accumulate<Rows: DimName, S>(
+    /// Consume validated residuals and (column offset, Jacobian) pairs.
+    /// Runtime row counts also support internal marginal priors. The iterator
+    /// is clonable so dense backends can form cross terms without allocating.
+    fn accumulate<'a>(
         &mut self,
-        residual: &Matrix<Self::Scalar, Rows, U1, S>,
-        jacobians: &[JacobianBlock<'_, Self::Scalar>],
-        columns: &[usize],
-    ) -> Result<(), EvaluationError>
-    where
-        S: Storage<Self::Scalar, Rows, U1> + IsContiguous;
+        residual: &[Self::Scalar],
+        jacobians: impl Iterator<Item = (usize, DMatrixView<'a, Self::Scalar, Dyn, Dyn>)> + Clone,
+    ) -> Result<(), EvaluationError>;
     /// Infinity norm of the unmodified linearized gradient, rejecting nonfinite values.
     /// Read before `solve`, which may overwrite gradient storage.
     fn gradient_norm(&self) -> Result<Self::Scalar, SolverError>;
@@ -446,7 +444,13 @@ impl<R: Real, B: LeastSquaresBackend<Scalar = R>> LinearizationSink for CheckedS
                 }
                 self.columns.push(block.offset);
             }
-            self.backend.accumulate(residual, jacobians, self.columns)
+            self.backend.accumulate(
+                residual.as_slice(),
+                jacobians
+                    .iter()
+                    .zip(self.columns.iter())
+                    .map(|(j, &col)| (col, j.jacobian())),
+            )
         })();
         self.failed |= result.is_err();
         result
