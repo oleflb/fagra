@@ -309,6 +309,23 @@ diagonal matrix are formed. Rejected attempts reuse the cached Jacobians and all
 buffers; they only repeat the linear solve, retraction, and cost evaluation.
 Warm calls within retained capacity are allocation-free when user code is too.
 
+Damped LSMR uses diagonal right-preconditioning by default: solve in coordinates
+`z = D delta` with operator `[J D^-1; sqrt(lambda) I]`, then recover `delta`.
+Set `Lsmr::diagonal_preconditioning = false` before constructing LM to use the
+original coordinates. This changes the inner stopping norm, not the objective.
+`backend().diagnostics()` retains termination, iteration count, finite-step status,
+column-scale bounds, and estimated/explicit normal residuals after errors too.
+`Lsmr::on_solve` optionally observes each attempt. Explicit residuals are computed
+in both original and solver coordinates for damped solves.
+
+For correlated variable coordinates, set `Lsmr::block_preconditioning = true`.
+This adds small variable-block Cholesky preconditioners on top of diagonal
+scaling, with diagonal fallback when a block cannot be factored. It preserves
+the damped objective; the inner residual norm changes with the preconditioner.
+Set `collect_timings = true` and inspect `timings()` to measure assembly,
+factorization, operator products, preconditioning, and residual verification.
+Timing is opt-in. `LevenbergMarquardt::on_accept` observes accepted progress.
+
 `LmOptions` controls damping bounds, the column-norm floor, acceptance ratio, and
 retry count. Damping starts fresh each call. Only cost-decreasing steps with
 adequate actual/predicted agreement are accepted. Invalid trial geometry can be
@@ -396,3 +413,32 @@ cargo test --release --test optimizer compare_cholesky_lsmr -- --ignored --nocap
 ```
 
 See [solver performance](docs/solver-performance.md) for measured results and methodology.
+
+### BAL bundle adjustment
+
+Run the nine-parameter BAL camera model on a decompressed official dataset:
+
+```sh
+cargo run --release --example bal -- /path/to/problem-49-7776-pre.txt 20 1000 3
+```
+
+Arguments select the accepted-step limit, LSMR iteration limit, and repetitions.
+The runner uses LM + LSMR, batches observations by camera, independently checks
+the objective, and emits timings, errors, solver work, and Linux peak RSS as CSV.
+See [BAL measurements](docs/bal-performance.md) for downloads and reproduction.
+The original unpreconditioned baseline accepted no steps. Diagonal preconditioning
+now enables 20 accepted steps on all three datasets, reducing RMSE to 0.86–1.18
+pixels, but still reaches the configured iteration limit. Append `identity` to
+reproduce the unpreconditioned mode, or set `BAL_TRACE=1` for per-attempt diagnostics.
+
+The runner also accepts a preconditioner and inner tolerance, and reports
+component timings and time to 5%/2% of the initial objective:
+
+```sh
+cargo run --release --example bal -- /path/to/problem-49-7776-pre.txt 20 1000 1 block 1e-3
+```
+
+The [24-run tolerance sweep](docs/bal-performance.md#block-jacobi-and-inner-tolerance-sweep)
+found block mode at `1e-3` substantially faster than diagonal scaling on these
+datasets, while all runs still reached the 20-step limit. Library defaults remain
+diagonal preconditioning and the precision-aware default inner tolerance.

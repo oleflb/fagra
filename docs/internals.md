@@ -179,8 +179,36 @@ LM uses `D_j = max(||J[:,j]||, min_column_norm)` and the implicit operator
 `[J; sqrt(lambda) D]`. Column norms are computed once per linearization; the base
 Jacobian, gradient, and residual are not changed by retries. The prediction is
 computed directly as `-gᵀ delta - 0.5 ||J delta||²` with a cached Jacobian product,
-so approximate LSMR solves need not satisfy an exact-solve identity. Both GN and
-LM use identity preconditioning; damping scales are not a right preconditioner.
+so approximate LSMR solves need not satisfy an exact-solve identity. Undamped GN
+uses identity preconditioning. Damped LSMR defaults to `z = D delta`, applying
+`[J D^-1; sqrt(lambda) I]` and its transpose implicitly, then recovering `delta`.
+The undamped Jacobian and predicted reduction remain in original coordinates.
+Setting `diagonal_preconditioning = false` restores identity preconditioning.
+Inner stopping uses the solver-coordinate normal residual. Damped solves also
+explicitly recompute `Jᵀ(J delta+r) + lambda D² delta`, reporting its norm in both
+coordinate systems on success and exhaustion. All diagnostic workspace is reused.
+The optional `on_solve` function observes each numerically attempted solve after
+these diagnostics are populated; it does not authorize iteration-limited steps.
+
+Opt-in `block_preconditioning` first normalizes by D, then forms each observed
+variable's local Gram block `C_i = (J_i D_i^-1)ᵀ (J_i D_i^-1)`. Offsets and widths
+identify disjoint variables; inconsistent overlapping ranges are rejected. Each
+retry factors `C_i + lambda I = L_i L_iᵀ` using faer's Cholesky and supplies the
+block right preconditioner `L_i^-T` to faer's LSMR. Triangular solves apply it and
+its transpose; no inverses or global normal matrix are formed. Faer returns its
+solution in diagonally scaled coordinates, so only D^-1 is applied afterward.
+Unobserved coordinates and failed blocks keep diagonal treatment. Diagnostics
+report fallback counts and explicitly apply `L^-1 D^-1` to normal residuals.
+Storage is O(sum of squared variable dimensions), retained between calls, and
+the normalized Gram blocks are reused across damping retries.
+
+Optional component timings use monotonic clocks and synchronized counters to
+satisfy faer's `Sync` operator contract. Timing is disabled by default and performs
+no clock reads in operator products then. Forward, transpose, and preconditioner
+times are nested within total linear-solve time, not additional costs. Residual
+verification includes original-coordinate prediction and preconditioned residual
+transforms. `on_accept` observes a committed nonlinear step, so its cost is current
+but its gradient still belongs to the preceding linearization.
 
 The acceptance ratio uses the actual undamped nonlinear objective, including
 state-dependent marginal priors but excluding accumulated constant cost. Nielsen's

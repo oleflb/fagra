@@ -1,5 +1,11 @@
 # Gauss–Newton versus Levenberg–Marquardt
 
+These are historical measurements with identity preconditioning. Damped LSMR
+now defaults to diagonal right-preconditioning and recomputes residual diagnostics;
+the current benchmark command therefore measures the updated implementation.
+See [BAL follow-up](bal-performance.md#diagonal-preconditioning-follow-up) for
+measurements of the new solver on real data.
+
 Measured on 2026-09-18 with an AMD Ryzen AI 9 HX PRO 370, Rust 1.98.1,
 faer 0.24.4, release build, sequential kernels, pinned to logical CPU 2.
 
