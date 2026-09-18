@@ -1,4 +1,8 @@
-//! Property tests for user-defined [`Variable`] implementations.
+//! Property tests for user-defined variables, factors, and factor batches.
+//!
+//! For factors, implement [`TestFactor`] or [`TestFactorBatch`] on a fixture that
+//! generates input data and builds the evaluator with either real or dual scalars.
+//! Register it with [`crate::factor_tests!`] or [`crate::factor_batch_tests!`].
 //!
 //! Enable `test-support` on a **dev-dependency**, implement [`TestVariable`] inside
 //! your crate's `#[cfg(test)]` module, then invoke [`crate::variable_tests!`]. The
@@ -26,6 +30,11 @@ use proptest::{
 };
 
 use crate::{Jacobian, Tangent, Variable};
+
+mod factors;
+pub use factors::{
+    FactorProperty, TestFactor, TestFactorBatch, TestStates, check_factor, check_factor_batch,
+};
 
 /// The dual-number implementation used by the test runners (nalgebra 0.34 compatible).
 pub use num_dual;

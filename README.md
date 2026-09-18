@@ -76,10 +76,10 @@ fagra::variable_tests!(pose_properties, Pose<f64>);
 
 The generated tests use proptest for sampling/shrinking and matching-precision dual
 numbers to verify the analytical Jacobians. See the [variable testing guide](docs/variable-tests.md)
-and the test module in [the scalar example](examples/scalar_prior.rs):
+and the [scalar example's test fixtures](tests/scalar_properties.rs):
 
 ```sh
-cargo test --example scalar_prior --features test-support
+cargo test --test scalar_properties --features test-support
 ```
 
 ### 2. Define the constraint
@@ -132,6 +132,23 @@ factor scope.
 Use nalgebra through `faer_ext::nalgebra` to match the interoperability crate's
 version. The solver backend can borrow these coefficients as faer matrices with
 `block.jacobian().into_faer()`; see [backend interoperability](docs/internals.md#backend-interoperability).
+
+### Test your factors and batches
+
+With `test-support`, implement `testing::TestFactor` or `TestFactorBatch` on an
+input fixture. Its `cases()` generates state values and measurements; `build()`
+inserts states into the supplied test store and constructs the evaluator from
+their keys. Register the fixture and precision:
+
+```rust,ignore
+fagra::factor_tests!(prior, PriorCase, f64);
+fagra::factor_batch_tests!(reprojections, ReprojectionCase, f64);
+```
+
+The generated `cost` and `jacobians` tests check nonnegative least-squares cost
+and analytical Jacobians against dual-number residual derivatives. Batch tests
+also compare full, empty, and singleton selections. See the
+[factor testing guide](docs/factor-tests.md) for complete setup and examples.
 
 ### 3. Declare the graph's types
 

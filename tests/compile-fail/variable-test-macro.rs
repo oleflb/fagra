@@ -11,7 +11,7 @@ use fagra as renamed;
 renamed::variable_tests!(properties, OnlyInTests);
 
 #[cfg(test)]
-#[path = "../../examples/scalar_prior.rs"]
+#[path = "../scalar_properties.rs"]
 mod scalar;
 
 #[cfg(test)]

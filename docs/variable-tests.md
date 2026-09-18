@@ -43,7 +43,8 @@ differentiate an opaque real-valued function.
 ## Implement `TestVariable`
 
 Here is the test-side implementation for the scalar variable from the
-[complete runnable example](../examples/scalar_prior.rs):
+[scalar example](../examples/scalar_prior.rs), registered in
+[tests/scalar_properties.rs](../tests/scalar_properties.rs):
 
 ```rust,ignore
 #[cfg(test)]
@@ -180,7 +181,7 @@ such as a known transform acting on a known point, alongside the generated suite
 
 ```sh
 cargo test --features test-support
-cargo test --example scalar_prior --features test-support
+cargo test --test scalar_properties --features test-support
 cargo test --no-default-features
 cargo doc --no-deps --features test-support
 ```
