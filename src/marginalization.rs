@@ -1,5 +1,8 @@
 //! Square-root elimination and solver-owned, fixed-reference manifold priors.
 
+#[cfg(test)]
+mod tests;
+
 use std::{collections::HashSet, convert::Infallible, ops::Range};
 
 use faer::{

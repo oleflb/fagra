@@ -288,6 +288,37 @@ and unpreconditioned. Before constructing the optimizer, set `Lsmr::max_iteratio
 Linear iteration exhaustion returns `LinearSolveFailed` before applying a step.
 Each optimization call rebuilds the cache, including after graph or model edits.
 
+## Marginalization
+
+The application chooses which states to remove, including heterogeneous types:
+
+```rust,ignore
+let report = solver.marginalize(&[old_pose.block_id(), old_bias.block_id()])?;
+```
+
+The solver linearizes incident factors at the current estimates and eliminates the
+selected coordinates with rank-aware QR on Jacobian rows. It does not optimize
+first or impose a time-window policy. Surviving-only factors stay nonlinear;
+absorbed information becomes a fixed-reference prior with the correct Lie-group
+coordinate derivatives. Removed state and factor handles become stale.
+
+Run the [checked scalar example](examples/marginalization.rs):
+
+```sh
+cargo run --example marginalization
+```
+
+It compares the full and reduced problems against the analytical answer: `y = 5`,
+cost `1.5`. Both marginalization and its LSMR optimization avoid normal equations.
+The default `optimize()` method still uses normal-equation Cholesky.
+
+`marginalize_with` accepts `MarginalizationOptions` for the relative numerical rank
+tolerance. Empty batches can be retired explicitly with `remove_batch`.
+This first implementation scans graph metadata and uses a dense affected front;
+it retains QR workspace but is not an incremental sparse marginalizer. See
+[the internal design](docs/internals.md#square-root-marginalization) for semantics
+and scaling limits.
+
 ## Shared evaluation and further reading
 
 - [Batching guide](docs/batching.md): shared models, individual payloads, and the

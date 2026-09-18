@@ -57,6 +57,9 @@
 
 #![deny(missing_docs)]
 
+#[cfg(test)]
+extern crate self as fagra;
+
 mod dense;
 mod error;
 mod factors;
