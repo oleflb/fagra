@@ -315,9 +315,11 @@ The default `optimize()` method still uses normal-equation Cholesky.
 `marginalize_with` accepts `MarginalizationOptions` for the relative numerical rank
 tolerance. Empty batches can be retired explicitly with `remove_batch`.
 This first implementation scans graph metadata and uses a dense affected front;
-it retains QR workspace but is not an incremental sparse marginalizer. See
+it reuses planning, QR, and prior storage for allocation-free warm calls within
+retained capacities, but is not an incremental sparse marginalizer. See
 [the internal design](docs/internals.md#square-root-marginalization) for semantics
-and scaling limits.
+and scaling limits, and [marginalization performance](docs/marginalization-performance.md)
+for before/after measurements and allocation checks.
 
 ## Shared evaluation and further reading
 

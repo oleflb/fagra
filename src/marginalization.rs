@@ -3,7 +3,11 @@
 #[cfg(test)]
 mod tests;
 
-use std::{collections::HashSet, convert::Infallible, ops::Range};
+use std::{
+    collections::HashSet,
+    convert::Infallible,
+    ops::{Deref, DerefMut, Range},
+};
 
 use faer::{
     Conj, Mat, Par,
@@ -73,20 +77,20 @@ pub(crate) struct Anchor<T: Variable> {
 
 struct Prior<R> {
     blocks: Vec<(BlockId, Range<usize>)>,
-    a: Mat<R>,
+    a: MatrixBuffer<R>,
     b: Vec<R>,
     residual: Vec<R>,
-    jacobian: Mat<R>,
+    jacobian: MatrixBuffer<R>,
 }
 
 impl<R: Real> Default for Prior<R> {
     fn default() -> Self {
         Self {
             blocks: Vec::new(),
-            a: Mat::new(),
+            a: MatrixBuffer::default(),
             b: Vec::new(),
             residual: Vec::new(),
-            jacobian: Mat::new(),
+            jacobian: MatrixBuffer::default(),
         }
     }
 }
@@ -95,6 +99,7 @@ impl<R: Real> Default for Prior<R> {
 #[doc(hidden)]
 pub struct Priors<R: Real> {
     entries: DensePool<Prior<R>>,
+    spare: Vec<Prior<R>>,
     pub(crate) constant: R,
 }
 
@@ -102,6 +107,7 @@ impl<R: Real> Default for Priors<R> {
     fn default() -> Self {
         Self {
             entries: DensePool::default(),
+            spare: Vec::new(),
             constant: R::zero(),
         }
     }
@@ -283,10 +289,44 @@ impl<R: Real> LeastSquaresBackend for Rows<R> {
     }
 }
 
+// faer 0.24 may shrink the other capacity when growing one dimension. Reserve
+// both high-water dimensions before resizing so alternating shapes do not churn.
+struct MatrixBuffer<R> {
+    matrix: Mat<R>,
+    capacity: (usize, usize),
+}
+impl<R> Default for MatrixBuffer<R> {
+    fn default() -> Self {
+        Self {
+            matrix: Mat::new(),
+            capacity: (0, 0),
+        }
+    }
+}
+impl<R: Real> MatrixBuffer<R> {
+    fn resize(&mut self, rows: usize, cols: usize) {
+        self.capacity.0 = self.capacity.0.max(rows);
+        self.capacity.1 = self.capacity.1.max(cols);
+        self.matrix.reserve(self.capacity.0, self.capacity.1);
+        self.matrix.resize_with(rows, cols, |_, _| R::zero());
+    }
+}
+impl<R> Deref for MatrixBuffer<R> {
+    type Target = Mat<R>;
+    fn deref(&self) -> &Mat<R> {
+        &self.matrix
+    }
+}
+impl<R> DerefMut for MatrixBuffer<R> {
+    fn deref_mut(&mut self) -> &mut Mat<R> {
+        &mut self.matrix
+    }
+}
+
 struct Elimination<R: Real> {
     rows: Rows<R>,
-    matrix: Mat<R>,
-    coefficients: Mat<R>,
+    matrix: MatrixBuffer<R>,
+    coefficients: MatrixBuffer<R>,
     permutation: Vec<usize>,
     inverse: Vec<usize>,
     scratch: Option<MemBuffer>,
@@ -299,8 +339,8 @@ impl<R: Real> Default for Elimination<R> {
                 dimension: 0,
                 values: Vec::new(),
             },
-            matrix: Mat::new(),
-            coefficients: Mat::new(),
+            matrix: MatrixBuffer::default(),
+            coefficients: MatrixBuffer::default(),
             permutation: Vec::new(),
             inverse: Vec::new(),
             scratch: None,
@@ -331,8 +371,7 @@ impl<R: Real> Elimination<R> {
             return;
         }
         let block = 32.min(height.min(width));
-        self.coefficients
-            .resize_with(block, height.min(width), |_, _| R::zero());
+        self.coefficients.resize(block, height.min(width));
         self.inverse.resize(width, 0);
         let trailing = self.matrix.ncols() - column - width;
         let req = factor::qr_in_place_scratch::<usize, R>(height, width, block, Par::Seq, Default::default())
@@ -375,7 +414,7 @@ impl<R: Real> Elimination<R> {
     ) -> Result<(R, usize), SolverError> {
         let n = self.rows.dimension;
         let m = self.rows.values.len() / (n + 1);
-        self.matrix.resize_with(m, n + 1, |_, _| R::zero());
+        self.matrix.resize(m, n + 1);
         for col in 0..=n {
             for row in 0..m {
                 self.matrix[(row, col)] = self.rows.values[row * (n + 1) + col];
@@ -396,13 +435,11 @@ impl<R: Real> Elimination<R> {
         let separator = n - removed;
         self.qr(rank, removed, separator);
         let rows = (m - rank).min(separator);
-        prior.a.resize_with(rows, separator, |_, _| R::zero());
+        prior.a.resize(rows, separator);
         prior.a.as_mut().fill(R::zero());
         prior.b.resize(rows, R::zero());
         prior.residual.resize(rows, R::zero());
-        prior
-            .jacobian
-            .resize_with(rows, separator, |_, _| R::zero());
+        prior.jacobian.resize(rows, separator);
         let a = &mut prior.a;
         let b = &mut prior.b;
         for row in 0..rows {
@@ -441,12 +478,14 @@ struct Planning {
 }
 
 pub(crate) struct Marginalizer<R: Real> {
+    planning: Planning,
     numeric: Elimination<R>,
 }
 
 impl<R: Real> Default for Marginalizer<R> {
     fn default() -> Self {
         Self {
+            planning: Planning::default(),
             numeric: Elimination::default(),
         }
     }
@@ -472,7 +511,6 @@ impl<R: Real> Marginalizer<R> {
             return Err(SolverError::InvalidRankTolerance);
         }
         let input = remove;
-        let mut planning = Planning::default();
         let Planning {
             remove,
             full,
@@ -483,7 +521,7 @@ impl<R: Real> Marginalizer<R> {
             marks,
             columns,
             swaps,
-        } = &mut planning;
+        } = &mut self.planning;
         remove.clear();
         remove.extend(input.iter().copied());
         if remove.is_empty() {
@@ -608,7 +646,10 @@ impl<R: Real> Marginalizer<R> {
             return Err(EvaluationError::InvalidEmission.into());
         }
         priors.linearize(states, &mut self.numeric.rows, layout, Some(affected))?;
-        let prior = Prior::default();
+        // Keep a distinct pending buffer until publication. Recycle both on
+        // success and failure; capacity includes simultaneous active and pending priors.
+        priors.spare.reserve(absorbed_priors + 1);
+        let prior = priors.spare.pop().unwrap_or_default();
         let new = priors.entries.insert(prior);
         let mut pending = Pending {
             states,
@@ -667,12 +708,14 @@ impl<R: Real> Marginalizer<R> {
                 local: pending.priors.entries.keys[index],
             };
             if affected.contains(&FactorId(key)) {
-                pending.priors.entries.remove(key).expect("live prior");
+                let prior = pending.priors.entries.remove(key).expect("live prior");
+                pending.priors.spare.push(prior);
             }
         }
         pending.priors.constant = constant;
         if report.prior_rows == 0 {
-            pending.priors.entries.remove(new).expect("empty prior");
+            let prior = pending.priors.entries.remove(new).expect("empty prior");
+            pending.priors.spare.push(prior);
         }
         pending.published = true;
         Ok(report)
@@ -734,8 +777,8 @@ impl<R: Real> StateVisitor<R> for CaptureAnchors<'_> {
         &mut self,
         pool: &mut StatePool<T>,
     ) -> Result<(), SolverError> {
-        let mut anchors = Vec::new();
-        for (id, value) in pool.iter() {
+        let (values, anchors) = pool.values_and_anchors();
+        for (id, value) in values {
             if let Some(&index) = self.layout.block_index.get(&id)
                 && !self.remove.contains(&id)
             {
@@ -751,7 +794,6 @@ impl<R: Real> StateVisitor<R> for CaptureAnchors<'_> {
                 });
             }
         }
-        pool.anchors.extend(anchors);
         Ok(())
     }
 }
@@ -779,7 +821,8 @@ impl<S: StateSchema> Drop for Pending<'_, S> {
                 }
             }
             self.states.visit(&mut Remove(key)).unwrap();
-            self.priors.entries.remove(key).expect("unpublished prior");
+            let prior = self.priors.entries.remove(key).expect("unpublished prior");
+            self.priors.spare.push(prior);
         }
     }
 }

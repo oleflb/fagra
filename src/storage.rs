@@ -43,6 +43,18 @@ impl<T: Variable> Default for StatePool<T> {
 }
 
 impl<T: Variable> StatePool<T> {
+    pub(crate) fn values_and_anchors(
+        &mut self,
+    ) -> (impl Iterator<Item = (BlockId, &T)>, &mut Vec<Anchor<T>>) {
+        // Marginalization captures accepted values, never trial values.
+        assert!(!self.trial_active);
+        (
+            self.entries
+                .iter()
+                .map(|(key, value)| (BlockId(key), value)),
+            &mut self.anchors,
+        )
+    }
     pub(crate) fn remove_selected(&mut self, ids: &std::collections::HashSet<BlockId>) {
         for index in (0..self.entries.keys.len()).rev() {
             let raw = RawKey {

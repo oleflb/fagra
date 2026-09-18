@@ -284,8 +284,22 @@ optimization as well as marginalization.
 
 The first implementation scans graph metadata and forms one dense affected front.
 For `m` incident residual rows and `n` affected coordinates, assembly uses O(mn)
-storage; separator storage is O(s²). Numerical QR buffers retain capacity,
-but structural planning, replacement priors, and reference capture allocate.
+storage; separator storage is O(s²). Planning sets/layouts, emission bookkeeping,
+batch swap logs, and numerical buffers retain capacity. Removed and failed pending
+priors are recycled, including their coefficient, residual, Jacobian, and block
+buffers. Typed references are appended directly to the state pool's retained anchor
+vector and removed on rollback or absorption. The old prior stays intact until
+publication, so capacity must cover active and pending priors simultaneously.
+Both matrix dimensions retain their high-water capacities: faer 0.24's ordinary
+resize can otherwise shrink one capacity while growing the other.
+
+After warm-up, calls within retained capacities perform no library heap
+allocations. Growth in graph size, matrix dimensions, or simultaneous prior count
+can allocate; user factors and geometry must also avoid allocations to obtain
+an end-to-end guarantee. Retained buffers are released when the solver is dropped.
+Tests count allocations for ordinary/batched windows, changing prior shapes,
+empty separators, and pending-prior failure/retry. See
+[measured performance](marginalization-performance.md).
 
 There is no incidence index, sparse-front
 ordering, or incremental relinearization cache. Those are the next performance

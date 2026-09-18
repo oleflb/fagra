@@ -137,8 +137,14 @@ fn manifold_prior_uses_the_current_chart_derivative() {
     let prior = priors.entries.insert(Prior {
         blocks: vec![(key.block_id(), 0..6)],
         residual: b.clone(),
-        jacobian: a.clone(),
-        a: a,
+        jacobian: MatrixBuffer {
+            matrix: a.clone(),
+            capacity: (2, 6),
+        },
+        a: MatrixBuffer {
+            matrix: a,
+            capacity: (2, 6),
+        },
         b,
     });
     pool.anchors.push(Anchor {

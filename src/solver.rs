@@ -193,6 +193,10 @@ where
     /// Removed state/factor handles become stale; surviving handles remain valid.
     /// Errors during validation or evaluation leave the graph unchanged. Empty
     /// batches remain reusable until explicitly retired with [`Self::remove_batch`].
+    /// Planning, numerical, and replacement-prior buffers are reused. After
+    /// warming the relevant shapes and simultaneous prior count, calls within
+    /// retained capacities allocate no library heap memory. User geometry and
+    /// evaluators must also avoid allocations for an end-to-end guarantee.
     pub fn marginalize(
         &mut self,
         variables: &[BlockId],
