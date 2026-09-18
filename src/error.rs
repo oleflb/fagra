@@ -43,8 +43,8 @@ pub enum SolverError {
     /// Only empty batches may be retired explicitly.
     #[error("batch still contains factors")]
     BatchNotEmpty,
-    /// Iteration limits or convergence tolerances are invalid.
-    #[error("optimization requires a positive iteration limit and finite, nonnegative tolerances")]
+    /// Iteration, convergence, or damping controls are invalid.
+    #[error("invalid optimization limits, tolerances, or damping controls")]
     InvalidOptions,
     /// A supplied handle could not be resolved.
     #[error(transparent)]
@@ -58,4 +58,7 @@ pub enum SolverError {
     /// Optimization did not meet its convergence criterion.
     #[error("optimization did not converge")]
     NoConvergence,
+    /// LM exhausted its retries or stagnated without meeting gradient tolerance.
+    #[error("optimization could not make progress; accepted estimates are retained")]
+    NoProgress,
 }

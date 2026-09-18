@@ -6,7 +6,7 @@
 //!
 //! # Status
 //! Graph construction, generational handles, checked state access, factor and
-//! batch insertion, cost evaluation, removal, and Gauss–Newton optimization
+//! batch insertion, cost evaluation, removal, Gauss–Newton and Levenberg–Marquardt optimization,
 //! and bulk square-root [`marginalization`](Solver::marginalize) are implemented.
 //!
 //! # Quick start: one scalar and one prior
@@ -35,6 +35,9 @@
 //! positive-definite normal matrix, so gauge freedoms need explicit constraints.
 //! Select [`Lsmr`] with `GaussNewton::new(Lsmr::default())` for an iterative solve
 //! using cached local Jacobians without assembling a global matrix.
+//! [`LevenbergMarquardt`] defaults to LSMR with implicit scaled damping. It rejects
+//! uphill or invalid trials, reusing the same linearization across bounded retries.
+//! Inspect [`LevenbergMarquardt::statistics`] for progress even after an error.
 //!
 //! # Shared evaluation with batches
 //! Use [`FactorBatch`] when many factors share computation. Register its model
@@ -82,10 +85,13 @@ pub use error::{EvaluationError, KeyError, SolverError};
 pub use factors::{Factor, FactorBatch, FactorSelection};
 pub use key::{BatchKey, BlockId, FactorId, FactorKey, StateKey};
 pub use linearization::{JacobianBlock, LinearizationSink};
-pub use lsmr::Lsmr;
+pub use lsmr::{Lsmr, LsmrStatistics};
 pub use marginalization::{MarginalizationOptions, MarginalizationReport};
 pub use normal::DenseNormalCholesky;
-pub use optimization::{GaussNewton, OptimizeOptions, OptimizeReport, TerminationReason};
+pub use optimization::{
+    GaussNewton, LevenbergMarquardt, LmOptions, LmStatistics, OptimizeOptions, OptimizeReport,
+    TerminationReason, TrialFailure,
+};
 pub use real::Real;
 pub use solver::Solver;
 pub use states::StateStore;
@@ -100,7 +106,9 @@ pub use variable::{Jacobian, Tangent, Variable};
 pub mod __private {
     pub use crate::factors::{FactorSchema, FactorStore, FactorVisitor};
     pub use crate::marginalization::Priors;
-    pub use crate::optimization::{LeastSquaresBackend, Optimizer};
+    pub use crate::optimization::{
+        DampedLeastSquaresBackend, DampedStep, LeastSquaresBackend, Optimizer,
+    };
     pub use crate::states::{StateSchema, StateVisitor};
     pub use crate::storage::{BatchPool, FactorPool, PoolAccess, StatePool};
 }
