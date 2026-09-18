@@ -292,8 +292,9 @@ Each optimization call rebuilds the cache, including after graph or model edits.
 - [Batching guide](docs/batching.md): shared models, individual payloads, and the
   ordinary-versus-batched factor-scope rules.
 - [SLAM example](examples/slam.rs): manifold variables and shared trajectory
-  computation across six-variable reprojections. State Lie-group geometry is implemented;
-  factor geometry remains placeholder code.
+  computation across three-variable reprojections, using fixed calibration and
+  linear translation/shortest-path rotation interpolation between two poses. Run with
+  `cargo run --example slam` to optimize a synthetic scene and remove an observation.
 - [Internal design](docs/internals.md): typed pools, schema visitors, and numerical solver passes.
 
 ## Checks and storage timings

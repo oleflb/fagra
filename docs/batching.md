@@ -19,8 +19,9 @@ must report each payload's complete dependencies, including shared inputs.
 Its `cost` sums only the selected factors' costs, using the same objective as
 `Factor::cost`. Empty selections do no work.
 
-The model also declares `type Scalar`: `f64` in the SLAM example, or `R` for a
-generic model bounded by `fagra::Real`. Its cost returns that scalar and its
+The model also declares `type Scalar`: `R` in the generic SLAM evaluator,
+bounded by `faer_ext::nalgebra::RealField + Copy` (defaulting to `f64`).
+Solver schemas additionally require `fagra::Real`. Its cost returns that scalar and its
 linearization accepts `L: LinearizationSink<Scalar = Self::Scalar>`. Generic
 schemas register batches as `Batch<Model<R>, Payload<R>>`; the evaluator's
 scalar must match the graph. Payloads themselves need no scalar trait.
@@ -44,7 +45,8 @@ Each payload type selects one registered family. That family can contain many
 batch instances, each with its own model and contiguous payload buffer.
 
 ```rust
-let frame = solver.add_batch(FrameReprojections { trajectory, camera });
+let camera = CameraIntrinsics::new(500.0, 510.0, 320.0, 240.0);
+let frame = solver.add_batch(FrameReprojections::new(trajectory, camera, 0.5));
 let observation = solver.add_factor_to(frame, Reprojection { landmark, pixel })?;
 
 solver.optimize()?;
@@ -56,9 +58,12 @@ Removing one observation preserves sibling factor handles. Empty batches keep
 their models and remain reusable through the same `BatchKey` until the solver
 is dropped. Batch keys and all shared/local dependencies are validated before
 payload insertion; rejected payloads are dropped without publishing an entry.
-Dense GN optimization supports both ordinary factors and batches. The SLAM
-example implements state Lie-group geometry; its factor geometry and
-marginalization are still placeholder code.
+Dense GN optimization supports both ordinary factors and batches. Run the SLAM
+example with `cargo run --example slam`: each frame shares linear translation
+and shortest-path rotation interpolation between two distinct endpoint pose states.
+Calibration is fixed batch data; each observation depends on the two poses and a
+landmark. The example optimizes a synthetic scene and removes an observation
+independently. Numerical details live in [the geometry module](../examples/slam/geometry.rs).
 
 Selections preserve payload/identity order even after compaction. `len()` counts
 remaining entries, and `as_slice()` returns those same remaining payloads as

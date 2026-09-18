@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f035985f58a1942ac1eb24fdb98931d5795cc157a992b59115b4b0b977e58eed # shrinks to PriorCase { value: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], measurement: [0.0, 0.0, 0.0, 0.0, 0.0, 0.025501969057003887] }
+cc 8b90f498e33b69152a179c2cf9fac665f1958527549f16cce06040036321c5be # shrinks to FrameCase { a: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], b: [0.0, 0.0, 0.0, 0.0, 0.0, 0.022202650423503726], u: 1.0, points: [[0.0, 0.0, 4.0], [0.0, 0.0, 4.0]], pixel_offset: 0.0 }
+cc 07327b1d2f59c4b2f9b5ee46daefe40dbb0f2b44ef7e423f2c11efefdbd84e26 # shrinks to FrameCase { a: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], b: [0.0, 0.0, 0.0, 0.0, 0.0, -0.1722538398986757], u: 1.0, points: [[0.0, 0.0, 4.0], [0.0, 0.0, 4.0]], pixel_offset: 0.0 }

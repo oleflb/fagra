@@ -12,12 +12,11 @@ use fg::__private::{
 use fg::{
     BatchKey, EvaluationError, FactorBatch, FactorKey, KeyError, Solver, SolverError, StateKey,
 };
-use slam::{CameraIntrinsics, FrameReprojections, Landmark, Pose, Reprojection, SlamFactors};
+use slam::{FrameReprojections, Landmark, Pose, Reprojection, SlamFactors};
 
 fg::states! {
     OtherStates {
         points: Landmark,
-        calibration: CameraIntrinsics,
         trajectory: Pose
     }
 }
@@ -66,7 +65,6 @@ fn typed_pool_access_and_factor_routes_are_generated() {
     let mut factors = SlamFactors::default();
     access::<_, StatePool<Pose>>(&mut states);
     access::<_, StatePool<Landmark>>(&mut states);
-    access::<_, StatePool<CameraIntrinsics>>(&mut states);
     access::<_, FactorPool<slam::PosePrior>>(&mut factors);
     access::<_, BatchPool<FrameReprojections, Reprojection>>(&mut factors);
     readable::<OtherStates, Pose>();
@@ -122,7 +120,6 @@ fn visitors_preserve_order_and_stop_at_the_first_error() {
 
     let state_order = [
         std::any::type_name::<Landmark>(),
-        std::any::type_name::<CameraIntrinsics>(),
         std::any::type_name::<Pose>(),
     ];
     let factor_order = [
@@ -218,10 +215,10 @@ fn infallible_visitors_support_both_schema_kinds() {
 
     let mut count = Count(0);
     OtherStates::default().visit(&mut count).unwrap();
-    assert_eq!(count.0, 3);
+    assert_eq!(count.0, 2);
     <SlamFactors as FactorSchema<OtherStates>>::visit(&mut SlamFactors::default(), &mut count)
         .unwrap();
-    assert_eq!(count.0, 5);
+    assert_eq!(count.0, 4);
 }
 
 #[test]
@@ -245,7 +242,7 @@ fn batches_and_factor_storage_support_multiple_state_schemas() {
 
 #[test]
 fn batched_payload_is_inferred_from_the_model() {
-    // Type-check the complete handle path without invoking the placeholder SLAM geometry.
+    // Type-check the complete handle path without constructing a scene.
     let _workflow = |solver: &mut Solver<OtherStates, SlamFactors>,
                      model: FrameReprojections,
                      payload: Reprojection|

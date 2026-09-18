@@ -147,12 +147,6 @@ fn right_perturbation_geometry_matches_finite_differences() {
     check_geometry::<f64, scalar::Scalar>(&[0.7], &[-0.2], 1e-6, 1e-7);
     check_geometry::<f32, scalar::Scalar<f32>>(&[0.7], &[-0.2], 1e-2, 2e-4);
     check_geometry::<f64, slam::Landmark>(&[0.1, 0.5, 0.2], &[-0.7, 0.2, 0.8], 1e-6, 1e-7);
-    check_geometry::<f64, slam::CameraIntrinsics>(
-        &[500.0, 490.0, 320.0, 240.0],
-        &[3.0, -2.0, 0.4, -0.1],
-        1e-5,
-        1e-7,
-    );
     for delta in [
         [0.0; 6],
         [0.5, -0.2, 0.3, 0.0, 0.0, 0.0],
