@@ -178,6 +178,7 @@ impl<T> FactorPool<T> {
     pub fn factor_cost<S>(&self, states: &S, key: FactorKey<T>) -> Result<T::Scalar, SolverError>
     where
         T: Factor<S>,
+        T::Scalar: Real,
     {
         checked_cost(self.entries.get(key.raw)?.cost(states))
     }
@@ -290,6 +291,7 @@ impl<B, P> BatchPool<B, P> {
     pub fn factor_cost<S>(&self, states: &S, key: FactorKey<P>) -> Result<B::Scalar, SolverError>
     where
         B: FactorBatch<S, Factor = P>,
+        B::Scalar: Real,
     {
         let location = self.locations.get(key.raw)?;
         let batch = self.batches.at_slot(location.batch_slot);

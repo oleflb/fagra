@@ -185,16 +185,15 @@ let mut double = Solver::<States<f64>, Factors<f64>>::new();
 ```
 
 The macros introduce `R: fagra::Real`, which combines faer's and nalgebra's
-real-number traits with `Copy`. Use the same bound on generic application types.
+real-number traits with `Copy`. This bound is required for backend arithmetic.
 Variables, factors, and batch models declare `type Scalar = R`; evaluators accept
 `L: LinearizationSink<Scalar = R>`. A variable's `tangent_from_slice` receives
 `&[R]`, and costs return `Result<R, EvaluationError>`. See the
 [generic scalar-prior example](examples/scalar_prior.rs) for a complete implementation.
 
-For dual-number geometry tests, implement the variable itself over
-`R: faer_ext::nalgebra::RealField + Copy`. Factors and solver schemas still use
-`R: fagra::Real`; dual variables are evaluated by the test runner, not optimized
-by the numerical backend.
+For dual-number tests, implement variables, factors, and batches over
+`R: faer_ext::nalgebra::RealField + Copy`. Evaluation traits support these geometry
+scalars; solver schemas and numerical backends still require `R: fagra::Real`.
 
 Both schemas and the selected backend must agree on precision. A Jacobian's
 coefficients must match its variable's scalar type. These are compile-time checks.

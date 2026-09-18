@@ -73,7 +73,7 @@ pub trait Variable: Sized {
     ///
     /// Geometry only requires nalgebra's real-number operations, allowing the
     /// same implementation to run on dual numbers for derivative tests. Solver
-    /// schemas and factors separately require [`crate::Real`] for backend arithmetic.
+    /// schemas and numerical backends separately require [`crate::Real`].
     type Scalar: RealField + Copy;
 
     /// Compile-time tangent dimension, e.g. `faer_ext::nalgebra::Const<6>`.

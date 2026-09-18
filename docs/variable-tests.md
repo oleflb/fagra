@@ -35,8 +35,8 @@ impl<R: faer_ext::nalgebra::RealField + Copy> Variable for Pose<R> {
 }
 ```
 
-The solver still requires `fagra::Real` for its schema/factor/backend arithmetic.
-Dual numbers are used only to evaluate geometry in the tests. A variable
+The solver still requires `fagra::Real` for its schema/backend arithmetic.
+Dual numbers can evaluate geometry and factors in tests. A variable
 hard-coded to `f64` must first make its geometry scalar-generic; a macro cannot
 differentiate an opaque real-valued function.
 

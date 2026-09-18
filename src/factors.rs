@@ -1,5 +1,7 @@
 use std::iter::FusedIterator;
 
+use faer_ext::nalgebra::RealField;
+
 use crate::key::{LocalKey, PoolId, RawKey};
 use crate::storage::{BatchPool, FactorPool};
 use crate::{
@@ -13,7 +15,8 @@ use crate::{
 /// implement [`FactorBatch`] instead.
 pub trait Factor<S> {
     /// Scalar used for this factor's cost, residuals, and Jacobians.
-    type Scalar: Real;
+    /// Geometry scalars, including dual numbers, are supported; solvers require [`Real`].
+    type Scalar: RealField + Copy;
 
     /// Visit every variable dependency, including inputs shared by its residuals.
     ///
@@ -45,7 +48,8 @@ pub trait Factor<S> {
 /// evaluate only the supplied selection. Empty selections do no work.
 pub trait FactorBatch<S> {
     /// Scalar used by the shared evaluator and its selected factors.
-    type Scalar: Real;
+    /// Geometry scalars, including dual numbers, are supported; solvers require [`Real`].
+    type Scalar: RealField + Copy;
 
     /// One factor's local data; shared inputs live in `Self`.
     type Factor;

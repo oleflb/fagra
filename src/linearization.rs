@@ -1,18 +1,20 @@
-use faer_ext::nalgebra::{DMatrixView, DimName, Dyn, Matrix, Storage, U1, storage::IsContiguous};
+use faer_ext::nalgebra::{
+    DMatrixView, DimName, Dyn, Matrix, RealField, Storage, U1, storage::IsContiguous,
+};
 
-use crate::{BlockId, EvaluationError, FactorId, Real, StateKey, Variable};
+use crate::{BlockId, EvaluationError, FactorId, StateKey, Variable};
 
 /// A borrowed Jacobian matrix and the variable it differentiates.
 ///
 /// Descriptors can form a stack array; the matrices remain in their original storage.
 /// Construction borrows the coefficients without allocating or copying. Arbitrary
 /// row and column strides are preserved, including those of noncontiguous views.
-pub struct JacobianBlock<'a, R: Real = f64> {
+pub struct JacobianBlock<'a, R: RealField + Copy = f64> {
     variable: BlockId,
     jacobian: DMatrixView<'a, R, Dyn, Dyn>,
 }
 
-impl<'a, R: Real> JacobianBlock<'a, R> {
+impl<'a, R: RealField + Copy> JacobianBlock<'a, R> {
     /// Borrow a fixed-dimension Jacobian from any compatible nalgebra storage.
     ///
     /// Accepts owned matrices and immutable or mutably backed views borrowed
@@ -131,7 +133,7 @@ impl<'a, R: Real> JacobianBlock<'a, R> {
 /// directly from a batch would omit the factor identity. Both are invalid.
 pub trait LinearizationSink: Sized {
     /// Scalar shared by all residuals and Jacobians emitted to this sink.
-    type Scalar: Real;
+    type Scalar: RealField + Copy;
 
     /// Emit one factor's complete linearization within an identity scope.
     ///

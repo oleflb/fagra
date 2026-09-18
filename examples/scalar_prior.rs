@@ -50,12 +50,12 @@ impl<R: RealField + Copy> Variable for Scalar<R> {
     }
 }
 
-pub struct Prior<R: Real = f64> {
+pub struct Prior<R: RealField + Copy = f64> {
     pub variable: StateKey<Scalar<R>>,
     pub measurement: R,
 }
 
-impl<R: Real, S: StateStore<Scalar<R>>> Factor<S> for Prior<R> {
+impl<R: RealField + Copy, S: StateStore<Scalar<R>>> Factor<S> for Prior<R> {
     type Scalar = R;
 
     fn visit_variables(&self, mut visitor: impl FnMut(BlockId)) {
@@ -64,7 +64,7 @@ impl<R: Real, S: StateStore<Scalar<R>>> Factor<S> for Prior<R> {
 
     fn cost(&self, states: &S) -> Result<R, EvaluationError> {
         let residual = states.get(self.variable)?.0 - self.measurement;
-        let cost = R::from_f64_impl(0.5) * residual * residual;
+        let cost = R::from_f64(0.5).unwrap() * residual * residual;
         if !cost.is_finite() {
             return Err(EvaluationError::InvalidEvaluation);
         }
