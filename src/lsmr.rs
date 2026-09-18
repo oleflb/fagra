@@ -7,7 +7,7 @@ use faer_ext::nalgebra::{DMatrixView, Dyn};
 
 use crate::{
     EvaluationError, Real, SolverError,
-    optimization::{LeastSquaresBackend, norm_inf},
+    optimization::{DampedLeastSquaresBackend, DampedStep, LeastSquaresBackend, norm_inf},
 };
 
 #[derive(Debug)]
@@ -98,6 +98,116 @@ impl<R: Real> BiLinOp<R> for Jacobian<R> {
     }
 }
 
+/// Work performed since the most recent optimization/backend preparation.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LsmrStatistics {
+    /// Nonempty linear solve attempts, including unsuccessful attempts.
+    pub solves: usize,
+    /// Completed inner iterations, including unsuccessful attempts.
+    pub iterations: usize,
+}
+
+// The lower diagonal block is implicit; every operator application adds O(n)
+// work and no allocations. The original Jacobian remains untouched on retries.
+#[derive(Debug)]
+struct Damped<'a, R> {
+    jacobian: &'a Jacobian<R>,
+    diagonal: &'a [R],
+}
+impl<R: Real> LinOp<R> for Damped<'_, R> {
+    fn nrows(&self) -> usize {
+        self.jacobian.rows + self.jacobian.cols
+    }
+    fn ncols(&self) -> usize {
+        self.jacobian.cols
+    }
+    fn apply_scratch(&self, _: usize, _: Par) -> StackReq {
+        StackReq::EMPTY
+    }
+    fn apply(&self, out: MatMut<'_, R>, rhs: MatRef<'_, R>, par: Par, stack: &mut MemStack) {
+        let (top, mut bottom) = out.split_at_row_mut(self.jacobian.rows);
+        self.jacobian.apply(top, rhs, par, stack);
+        for k in 0..rhs.ncols() {
+            for j in 0..self.jacobian.cols {
+                bottom[(j, k)] = self.diagonal[j] * rhs[(j, k)];
+            }
+        }
+    }
+    fn conj_apply(&self, out: MatMut<'_, R>, rhs: MatRef<'_, R>, par: Par, stack: &mut MemStack) {
+        self.apply(out, rhs, par, stack);
+    }
+}
+impl<R: Real> BiLinOp<R> for Damped<'_, R> {
+    fn transpose_apply_scratch(&self, _: usize, _: Par) -> StackReq {
+        StackReq::EMPTY
+    }
+    fn transpose_apply(
+        &self,
+        mut out: MatMut<'_, R>,
+        rhs: MatRef<'_, R>,
+        par: Par,
+        stack: &mut MemStack,
+    ) {
+        let (top, bottom) = rhs.split_at_row(self.jacobian.rows);
+        self.jacobian.transpose_apply(out.as_mut(), top, par, stack);
+        for k in 0..rhs.ncols() {
+            for j in 0..self.jacobian.cols {
+                out[(j, k)] += self.diagonal[j] * bottom[(j, k)];
+            }
+        }
+    }
+    fn adjoint_apply(
+        &self,
+        out: MatMut<'_, R>,
+        rhs: MatRef<'_, R>,
+        par: Par,
+        stack: &mut MemStack,
+    ) {
+        self.transpose_apply(out, rhs, par, stack);
+    }
+}
+
+fn solve<R: Real>(
+    operator: &impl BiLinOp<R>,
+    rhs: &[R],
+    step: &mut [R],
+    params: lsmr::LsmrParams<R>,
+    scratch: &mut Option<MemBuffer>,
+    stats: &mut LsmrStatistics,
+) -> Result<(), SolverError> {
+    let (m, n) = (operator.nrows(), operator.ncols());
+    step.fill(R::zero());
+    if m == 0 || n == 0 {
+        return Ok(());
+    }
+    stats.solves += 1;
+    let precond = IdentityPrecond { dim: n };
+    // faer 0.24.4 omits wbar and vold from lsmr_scratch; both are n-by-1.
+    let vector = faer::linalg::temp_mat_scratch::<R>(n, 1);
+    let req = lsmr::lsmr_scratch::<R>(precond, operator, 1, Par::Seq)
+        .and(vector)
+        .and(vector);
+    if !scratch
+        .as_mut()
+        .is_some_and(|s| MemStack::new(s).can_hold(req))
+    {
+        *scratch = Some(MemBuffer::new(req));
+    }
+    lsmr::lsmr(
+        MatMut::from_column_major_slice_mut(step, n, 1),
+        precond,
+        operator,
+        MatRef::from_column_major_slice(rhs, m, 1),
+        params,
+        |_| stats.iterations += 1,
+        Par::Seq,
+        MemStack::new(scratch.as_mut().unwrap()),
+    )
+    .map_err(|_| SolverError::LinearSolveFailed)?;
+    norm_inf(step).map_err(|_| SolverError::LinearSolveFailed)?;
+    Ok(())
+}
+
 /// Least squares solved by faer's LSMR over cached local Jacobian blocks.
 ///
 /// Select with `GaussNewton::new(Lsmr::default())`. No global Jacobian or normal
@@ -119,6 +229,12 @@ pub struct Lsmr<R: Real = f64> {
     gradient: Vec<R>,
     step: Vec<R>,
     scratch: Option<MemBuffer>,
+    scales: Vec<R>,
+    diagonal: Vec<R>,
+    augmented_rhs: Vec<R>,
+    product: Vec<R>,
+    damping_ready: bool,
+    statistics: LsmrStatistics,
 }
 
 impl<R: Real> Default for Lsmr<R> {
@@ -137,6 +253,28 @@ impl<R: Real> Default for Lsmr<R> {
             gradient: Vec::new(),
             step: Vec::new(),
             scratch: None,
+            scales: Vec::new(),
+            diagonal: Vec::new(),
+            augmented_rhs: Vec::new(),
+            product: Vec::new(),
+            damping_ready: false,
+            statistics: LsmrStatistics::default(),
+        }
+    }
+}
+
+impl<R: Real> Lsmr<R> {
+    /// Inspect work performed since the last optimizer call prepared this backend.
+    pub fn statistics(&self) -> LsmrStatistics {
+        self.statistics
+    }
+
+    fn params(&self) -> lsmr::LsmrParams<R> {
+        lsmr::LsmrParams {
+            initial_guess: InitialGuessStatus::Zero,
+            rel_tolerance: self.relative_tolerance,
+            max_iters: self.max_iterations,
+            ..Default::default()
         }
     }
 }
@@ -145,6 +283,8 @@ impl<R: Real> LeastSquaresBackend for Lsmr<R> {
     type Scalar = R;
 
     fn prepare(&mut self, dimension: usize) -> Result<(), SolverError> {
+        self.statistics = LsmrStatistics::default();
+        self.damping_ready = false;
         if self.max_iterations == 0 || !(R::zero()..R::one()).contains(&self.relative_tolerance) {
             return Err(SolverError::InvalidOptions);
         }
@@ -155,6 +295,7 @@ impl<R: Real> LeastSquaresBackend for Lsmr<R> {
     }
 
     fn clear(&mut self) {
+        self.damping_ready = false;
         self.jacobian.rows = 0;
         self.jacobian.blocks.clear();
         self.jacobian.values.clear();
@@ -167,6 +308,7 @@ impl<R: Real> LeastSquaresBackend for Lsmr<R> {
         residual: &[R],
         jacobians: impl Iterator<Item = (usize, DMatrixView<'a, R, Dyn, Dyn>)> + Clone,
     ) -> Result<(), EvaluationError> {
+        self.damping_ready = false;
         let row = self.jacobian.rows;
         self.jacobian.rows = row
             .checked_add(residual.len())
@@ -199,43 +341,93 @@ impl<R: Real> LeastSquaresBackend for Lsmr<R> {
     }
 
     fn solve(&mut self) -> Result<&[R], SolverError> {
-        let (m, n) = (self.jacobian.rows, self.jacobian.cols);
-        self.step.fill(R::zero());
-        if m == 0 || n == 0 {
-            return Ok(&self.step);
-        }
-        let precond = IdentityPrecond { dim: n };
-        // faer 0.24.4 omits wbar and vold from lsmr_scratch; both are n-by-1.
-        // Remove this extra space when upstream's scratch calculation is fixed.
-        let vector = faer::linalg::temp_mat_scratch::<R>(n, 1);
-        let req = lsmr::lsmr_scratch::<R>(precond, &self.jacobian, 1, Par::Seq)
-            .and(vector)
-            .and(vector);
-        if !self
-            .scratch
-            .as_mut()
-            .is_some_and(|buffer| MemStack::new(buffer).can_hold(req))
-        {
-            self.scratch = Some(MemBuffer::new(req));
-        }
-        lsmr::lsmr(
-            MatMut::from_column_major_slice_mut(&mut self.step, n, 1),
-            precond,
+        let params = self.params();
+        solve(
             &self.jacobian,
-            MatRef::from_column_major_slice(&self.rhs, m, 1),
-            lsmr::LsmrParams {
-                initial_guess: InitialGuessStatus::Zero,
-                rel_tolerance: self.relative_tolerance,
-                max_iters: self.max_iterations,
-                ..Default::default()
-            },
-            |_| {},
-            Par::Seq,
-            MemStack::new(self.scratch.as_mut().unwrap()),
-        )
-        .map_err(|_| SolverError::LinearSolveFailed)?;
-        norm_inf(&self.step).map_err(|_| SolverError::LinearSolveFailed)?;
+            &self.rhs,
+            &mut self.step,
+            params,
+            &mut self.scratch,
+            &mut self.statistics,
+        )?;
         Ok(&self.step)
+    }
+}
+
+impl<R: Real> DampedLeastSquaresBackend for Lsmr<R> {
+    fn prepare_damping(&mut self, min_column_norm: R) -> Result<(), SolverError> {
+        self.damping_ready = false;
+        if !min_column_norm.is_finite() || min_column_norm <= R::zero() {
+            return Err(SolverError::InvalidOptions);
+        }
+        let (m, n) = (self.jacobian.rows, self.jacobian.cols);
+        self.scales.resize(n, R::zero());
+        self.scales.fill(R::zero());
+        // Stable column norms, computed only once per accepted-state linearization.
+        for b in &self.jacobian.blocks {
+            for col in 0..b.cols {
+                let norm = &mut self.scales[b.col + col];
+                for row in 0..b.rows {
+                    *norm = norm.hypot(self.jacobian.values[b.start + col * b.rows + row]);
+                }
+            }
+        }
+        norm_inf(&self.scales)?;
+        for scale in &mut self.scales {
+            *scale = scale.max(min_column_norm);
+        }
+        self.diagonal.resize(n, R::zero());
+        self.product.resize(m, R::zero());
+        self.augmented_rhs.resize(
+            m.checked_add(n).ok_or(EvaluationError::DimensionMismatch)?,
+            R::zero(),
+        );
+        self.augmented_rhs[..m].copy_from_slice(&self.rhs);
+        self.augmented_rhs[m..].fill(R::zero());
+        self.damping_ready = true;
+        Ok(())
+    }
+
+    fn solve_damped(&mut self, lambda: R) -> Result<DampedStep<'_, R>, SolverError> {
+        if !self.damping_ready || !lambda.is_finite() || lambda < R::zero() {
+            return Err(SolverError::InvalidOptions);
+        }
+        let root = lambda.sqrt();
+        for (d, &s) in self.diagonal.iter_mut().zip(&self.scales) {
+            *d = root * s;
+        }
+        norm_inf(&self.diagonal).map_err(|_| SolverError::LinearSolveFailed)?;
+        let params = self.params();
+        solve(
+            &Damped {
+                jacobian: &self.jacobian,
+                diagonal: &self.diagonal,
+            },
+            &self.augmented_rhs,
+            &mut self.step,
+            params,
+            &mut self.scratch,
+            &mut self.statistics,
+        )?;
+        let (m, n) = (self.jacobian.rows, self.jacobian.cols);
+        self.jacobian.apply(
+            MatMut::from_column_major_slice_mut(&mut self.product, m, 1),
+            MatRef::from_column_major_slice(&self.step, n, 1),
+            Par::Seq,
+            MemStack::new(&mut []),
+        );
+        let half = R::from_f64_impl(0.5);
+        let mut predicted_reduction = R::zero();
+        for (&g, &d) in self.gradient.iter().zip(&self.step) {
+            predicted_reduction -= g * d;
+        }
+        for &value in &self.product {
+            predicted_reduction -= (half * value) * value;
+        }
+        Ok(DampedStep {
+            delta: &self.step,
+            predicted_reduction,
+        })
     }
 }
 
@@ -247,6 +439,52 @@ mod tests {
     use faer_ext::nalgebra::{SMatrix, SVector};
 
     type Pair = crate::variable::test_support::Vector<2>;
+
+    #[test]
+    fn damped_retries_match_augmented_svd_and_preserve_the_model() {
+        use faer_ext::nalgebra::{DMatrix, DVector};
+        fn check<R: Real + Into<f64>>(tolerance: f64) {
+            let c = R::from_f64_impl;
+            let j =
+                SMatrix::<R, 3, 3>::from_row_slice(&[1., 2., 0., 3., -1., 0., 0., 1., 0.].map(c));
+            let residual = SVector::<R, 3>::from_column_slice(&[-3., 2., 1.].map(c));
+            let mut backend = Lsmr::<R>::default();
+            backend.prepare(3).unwrap();
+            backend
+                .accumulate(residual.as_slice(), std::iter::once((0, j.as_view())))
+                .unwrap();
+            backend.prepare_damping(c(1.0)).unwrap();
+            let plain = backend.solve().unwrap().to_vec();
+            for lambda in [1e-8_f64, 0.01, 1.0, 100.0, 1e-4, 0.0] {
+                let j = j.map(Into::<f64>::into);
+                let r = residual.map(Into::<f64>::into);
+                let mut augmented = DMatrix::zeros(6, 3);
+                augmented.view_mut((0, 0), (3, 3)).copy_from(&j);
+                for col in 0..3 {
+                    augmented[(3 + col, col)] = lambda.sqrt() * j.column(col).norm().max(1.0);
+                }
+                let mut rhs = DVector::zeros(6);
+                rhs.rows_mut(0, 3).copy_from(&(-r));
+                let expected = augmented.svd(true, true).solve(&rhs, 1e-12).unwrap();
+                let step = backend.solve_damped(c(lambda)).unwrap();
+                let actual = SVector::<f64, 3>::from_iterator(step.delta.iter().map(|&x| x.into()));
+                assert!(
+                    (actual - &expected).norm() < tolerance,
+                    "{} lambda={lambda} actual={actual:?} expected={expected:?}",
+                    std::any::type_name::<R>()
+                );
+                let prediction = 0.5 * (r.norm_squared() - (j * actual + r).norm_squared());
+                assert!((step.predicted_reduction.into() - prediction).abs() < tolerance);
+            }
+            for (&a, &b) in backend.solve().unwrap().iter().zip(&plain) {
+                assert!((a - b).abs() < c(tolerance));
+            }
+            assert_eq!(backend.statistics().solves, 8);
+            assert!(backend.statistics().iterations > 0);
+        }
+        check::<f64>(1e-9);
+        check::<f32>(3e-4);
+    }
 
     #[test]
     fn workspace_handles_large_coordinate_vectors() {
