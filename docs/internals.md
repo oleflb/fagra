@@ -161,6 +161,15 @@ state/cost visitors. Nonlinear methods live in child modules such as
 Both reuse the same graph layout, checked sink, and linearization workspace.
 The dense Cholesky backend lives separately in `src/normal.rs`.
 
+`src/lsmr.rs` and `src/schur.rs` are sibling iterative backends. They share a
+concrete `LinearizedModel` in `src/linear_model.rs`: cached Jacobians, negative
+residuals, gradient accumulation and column scales. Each backend owns its step,
+verification workspace, solver scratch, controls and diagnostics. Schur therefore
+does not allocate an LSMR augmented RHS or inherit an LSMR solver's state.
+Original-coordinate prediction and full damped normal-residual computation have
+one implementation on the shared model. Backend-specific diagnostic transforms
+and stopping norms remain separate.
+
 `Solver<S, F>` owns the graph and a retained default
 `GaussNewton<DenseNormalCholesky<S::Scalar>>` instance.
 `optimize_with` accepts a caller-owned method and stopping controls. The hidden
@@ -172,7 +181,7 @@ borrowed solution slice. Runtime row counts support marginal priors without
 weakening the public factor API's compile-time dimension checks.
 Its representation is unconstrained: QR can retain rows, while CG can use a matrix
 or block operator. `DampedLeastSquaresBackend` adds preparation of fixed column-norm
-scales and repeatable damped solves with predicted reduction. LSMR implements it;
+scales and repeatable damped solves with predicted reduction. LSMR and Schur implement it;
 normal-equation Cholesky retains its existing destructive, undamped solve.
 
 LM uses `D_j = max(||J[:,j]||, min_column_norm)` and the implicit operator
@@ -182,8 +191,16 @@ computed directly as `-gᵀ delta - 0.5 ||J delta||²` with a cached Jacobian pr
 so approximate LSMR solves need not satisfy an exact-solve identity. Undamped GN
 uses identity preconditioning. Damped LSMR defaults to `z = D delta`, applying
 `[J D^-1; sqrt(lambda) I]` and its transpose implicitly, then recovering `delta`.
+The forward operator computes D^-1 times each RHS column once in retained faer
+scratch, then uses the shared Jacobian product. It does not repeat division for
+every incident block or cache a second Jacobian. Damping rows still use the
+original solver-coordinate input. The transpose already scales once per coordinate.
 The undamped Jacobian and predicted reduction remain in original coordinates.
 Setting `diagonal_preconditioning = false` restores identity preconditioning.
+The two public flags are resolved to a prepared internal mode (identity, diagonal,
+or block-Jacobi). Accumulation/clearing/preparation invalidates it; changing to
+another mode requires a fresh damping preparation. Solves reject stale
+configurations rather than mixing a new scaling choice with old block factors.
 Inner stopping uses the solver-coordinate normal residual. Damped solves also
 explicitly recompute `Jᵀ(J delta+r) + lambda D² delta`, reporting its norm in both
 coordinate systems on success and exhaustion. All diagnostic workspace is reused.
@@ -201,6 +218,10 @@ Unobserved coordinates and failed blocks keep diagonal treatment. Diagnostics
 report fallback counts and explicitly apply `L^-1 D^-1` to normal residuals.
 Storage is O(sum of squared variable dimensions), retained between calls, and
 the normalized Gram blocks are reused across damping retries.
+`src/linear_model/block_factors.rs` encapsulates the packed matrices and ownership
+map. Consumers get read-only Gram views and factor/normal-inverse operations.
+LSMR's faer adapter in `src/lsmr/preconditioner.rs` owns optional instrumentation;
+the shared factor workspace contains neither timing nor solver-enable policy.
 
 Optional component timings use monotonic clocks and synchronized counters to
 satisfy faer's `Sync` operator contract. Timing is disabled by default and performs
@@ -237,6 +258,42 @@ lower triangle is cleared, accumulated, and read. Normal equations square J's
 condition number.
 
 ## Solver passes
+
+### Bipartite Schur backend
+
+`src/schur.rs` uses the shared linear model and normalized block-factor workspace.
+`Schur::new(retained_dimension, retained_width, eliminated_width)`
+requires a retained coordinate prefix and fixed block widths in each partition.
+Every emission can contain at most one variable from each side. This makes B and
+C block diagonal and supports unary factors. Unsupported couplings are rejected
+before publishing an emission into the cache; no cross terms are silently dropped.
+
+Each linearization caches E blocks per observation (duplicate camera-point pairs
+are summed implicitly by products). For scaled coordinates z = D delta, retries
+factor B + lambda I and C + lambda I, form the reduced RHS
+`-g_c + E C^-1 g_p`, then solve `S z_c = rhs` with
+`S = B - E C^-1 E^T`. Here B and C include damping. The rightmost point operation
+is two triangular solves, never an explicit inverse. CG is preconditioned by
+the inverse retained B blocks, not the exact diagonal blocks of S.
+Back-substitution recovers `z_p = C^-1 (-g_p - E^T z_c)` and delta = D^-1 z.
+Small local Gram blocks and sparse E suffice; a full Hessian or reduced matrix
+is never materialized. Local Cholesky failure is fatal to that solve: the
+preconditioner's diagonal fallback cannot substitute for exact elimination.
+
+The backend checks reduced residuals explicitly, then computes full damped normal
+residuals and the undamped prediction using the original Jacobians. Failed CG
+attempts remain errors. Unobserved coordinates have zero RHS/couplings; their
+undamped minimum-norm increment is zero. General marginal priors and retained
+variable couplings are unsupported unless their emitted blocks satisfy the same
+bipartite restriction. This is a specialized backend, not incremental elimination.
+
+Faer 0.24.4's CG `Zero` path does not initialize its residual, so this backend
+zeros its step explicitly and uses `MaybeNonZero` to compute b-A*0. Faer's
+exhaustion error also returns a stale initial residual (a shadowed variable);
+that estimate is omitted and the explicitly recomputed residual is reported.
+Dense-SVD retry tests, including unused blocks, cover the initialization workaround.
+
+### Nonlinear traversal
 
 Each optimization call rebuilds ordering and dependency metadata using retained
 vectors and maps. This handles graph edits and reusing one method across unrelated

@@ -5,6 +5,8 @@ The initial identity-preconditioned baseline below accepted no steps. The
 20 steps on all three datasets, but does not yet meet gradient convergence.
 The latest [block-Jacobi/tolerance sweep](#block-jacobi-and-inner-tolerance-sweep)
 improves runtime further while keeping the same objective and 20-step budget.
+An additional [36-run Schur comparison](schur-performance.md) evaluates point
+elimination against block-LSMR, using the runner's `schur` mode.
 
 Measured 2026-09-18 on AMD Ryzen AI 9 HX PRO 370, Linux x86-64,
 Rust 1.98.1, faer 0.24.4, release build, sequential kernels, pinned to
@@ -134,7 +136,7 @@ done
 
 Omit `taskset` where unavailable or choose an allowed CPU. The positional controls
 are accepted-step limit, inner iteration limit, repetitions, `scaled` (default),
-`block`, or `identity` preconditioning, and the relative inner tolerance (default
+`block`, `identity`, or `schur` backend mode, and the relative inner tolerance (default
 `1e-6`). Metadata goes
 to stderr and per-run CSV to stdout. Optimization errors are recorded in CSV;
 the runner exits successfully after reporting them. Invalid input or a failed
@@ -330,6 +332,11 @@ The 73-camera diagonal `1e-2` run even reaches 5% slightly sooner than block
 
 ### Component timings
 
+The current runner uses a backend-neutral CSV timing record: `products_s` combines
+LSMR forward/transpose products (or Schur reduced products), and `verification_s`
+replaces the earlier `diagnostics_s`. The historical table below keeps the separate
+forward and transpose measurements collected for this sweep.
+
 All sweep runs enable `collect_timings`. Measurements include clock/counter
 overhead; per-attempt text tracing is disabled. Operator timers use synchronized
 counters for faer's `Sync` trait contract. This instrumentation is opt-in for
@@ -386,6 +393,69 @@ Checks cover dense-SVD agreement in both precisions, repeated damping, coupled
 blocks, untouched coordinates, transpose consistency with multiple RHS columns,
 singular/nonfinite factorization fallback, overlapping-range rejection, and zero
 warm-call allocations in both diagonal and block modes. Defaults remain diagonal
-preconditioning and the existing precision-aware inner tolerance. A Schur backend
-or adaptive inexact-LM policy remains future work; neither is needed to obtain
-the improvements measured here.
+preconditioning and the existing precision-aware inner tolerance. An adaptive
+inexact-LM policy remains future work. The subsequent Schur backend has its own
+[implementation notes and comparison](schur-performance.md).
+
+## Once-per-vector scaling
+
+After the shared-model cleanup, the damped LSMR forward operator was changed to
+compute `D^-1 x` once per RHS column, using retained faer scratch, before applying
+the cached Jacobian. Previously it divided each input coordinate again for every
+incident Jacobian block. The transpose operator, block preconditioner, damping,
+stopping tolerances and nonlinear policy are unchanged. The implicit damping rows
+use the original solver-coordinate input, not the scaled scratch vector.
+
+For these BAL graphs the source-level division count per single-RHS forward
+product falls from `12 * observations` to `9 * cameras + 3 * points`, approximately
+a 16× reduction. Products and other solver work still dominate overall runtime.
+Additional temporary storage is O(n * RHS columns), served by the retained solver
+scratch allocation; no second Jacobian cache is created.
+
+### Before/after results
+
+Same hardware/toolchain and CPU pinning as above. Both versions were measured
+in the current working tree, immediately before/after this change, with three
+fresh-graph/fresh-backend calls per dataset, `block 1e-3`, 20 accepted steps,
+1,000 inner iterations maximum, and component timing enabled. No explicit warm-up
+or concurrent benchmark/test process. This is a non-interleaved three-run sweep;
+system variation is visible, especially in the largest baseline. The percentages
+are observed median reductions, not confidence intervals.
+
+| Cameras | Before median (s) | After median (s) | Runtime reduction | Before range (s) | After range (s) |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 49 | 7.841311 | 7.581697 | 3.3% | 7.663648–8.038358 | 7.340586–7.594622 |
+| 73 | 19.376861 | 17.779575 | 8.2% | 19.344741–19.693446 | 17.532889–18.587771 |
+| 138 | 38.603648 | 34.548371 | 10.5% | 36.546610–39.516518 | 34.469266–34.737745 |
+
+All printed final objectives, gradients, inner-iteration counts, accepted/rejected
+steps and statuses matched before and after. All runs still return `NoConvergence`
+after 20 accepted steps; independent objective checks passed. Final costs are
+13346.65675979, 17099.47197710 and 59378.63118544, with 1783, 3045 and 3135 inner
+iterations respectively. These gains therefore do not come from relaxed accuracy
+or fewer optimization steps.
+
+```csv
+cameras,version,run1_s,run2_s,run3_s
+49,before,7.663648,7.841311,8.038358
+49,after,7.581697,7.340586,7.594622
+73,before,19.344741,19.376861,19.693446
+73,after,17.532889,17.779575,18.587771
+138,before,36.546610,38.603648,39.516518
+138,after,34.548371,34.737745,34.469266
+```
+
+The existing reproduction command applies:
+
+```sh
+cargo build --release --example bal
+for problem in 49-7776 73-11032 138-19878; do
+  taskset -c 2 target/release/examples/bal \
+    "/tmp/fagra-bal/problem-${problem}-pre.txt" 20 1000 3 block 1e-3
+done
+```
+
+An additional operator test compares scaled/unscaled forward and transpose
+products with an independently assembled dense operator in f32/f64, for repeated
+column references, multiple RHS columns, and zero/small/large damping. Existing
+dense-SVD solve checks and warm zero-allocation checks also pass.

@@ -313,6 +313,9 @@ Damped LSMR uses diagonal right-preconditioning by default: solve in coordinates
 `z = D delta` with operator `[J D^-1; sqrt(lambda) I]`, then recover `delta`.
 Set `Lsmr::diagonal_preconditioning = false` before constructing LM to use the
 original coordinates. This changes the inner stopping norm, not the objective.
+Preconditioner selection is fixed during damping preparation. Changing the effective
+mode via the public flags requires preparing damping again; a solve with a stale mode
+returns `InvalidOptions`. Normal optimizer calls prepare this automatically.
 `backend().diagnostics()` retains termination, iteration count, finite-step status,
 column-scale bounds, and estimated/explicit normal residuals after errors too.
 `Lsmr::on_solve` optionally observes each attempt. Explicit residuals are computed
@@ -337,8 +340,37 @@ Small accepted steps with small cost changes trigger a fresh gradient check rath
 than declaring an over-damped step converged. Set `step_tolerance = 0` to disable
 that stagnation check; `cost_tolerance = 0` disables its additional cost condition.
 Marginal priors participate in costs and Jacobians, but optimizer damping is never
-marginalized. The default `solver.optimize()` remains GN with Cholesky; LM currently
-supports the LSMR backend. See [GN versus LM measurements](docs/lm-performance.md).
+marginalized. The default `solver.optimize()` remains GN with Cholesky; LM supports
+LSMR and the bipartite Schur backend below. See [GN versus LM measurements](docs/lm-performance.md).
+
+### Iterative Schur for bipartite graphs
+
+For a schema ordered as 9D cameras followed by 3D points:
+
+```rust,ignore
+let mut backend = fagra::Schur::new(camera_count * 9, 9, 3);
+backend.relative_tolerance = 1e-3;
+backend.collect_timings = true;
+let mut method = fagra::LevenbergMarquardt::new(backend);
+let result = solver.optimize_with(&mut method, &fagra::OptimizeOptions::default());
+let diagnostics = method.backend().diagnostics();
+```
+
+The constructor selects a retained coordinate prefix, its variable-block width,
+and the eliminated block width. Schema/pool order defines the coordinate order;
+reconstruct the backend when the partition changes. Each emitted residual may
+touch at most one full block in each partition. Unary factors are supported;
+other couplings return `EvaluationError::UnsupportedStructure` (including general
+marginal priors that violate this structure).
+
+Schur caches normalized local Gram and cross blocks, eliminates points with small
+Cholesky solves, and applies `B - E C^-1 E^T` implicitly. Faer's CG solves the
+reduced system using retained B-block preconditioning. No global normal or reduced
+matrix is assembled, but the algebra uses normal equations and can lose accuracy
+on poorly conditioned problems. Prediction uses the original cached Jacobians.
+The reduced stopping norm differs from LSMR's preconditioned normal-residual norm.
+See [Schur versus block-LSMR results](docs/schur-performance.md): this first Schur
+backend is not generally faster on the measured BAL problems.
 
 ## Marginalization
 
