@@ -1,6 +1,7 @@
 use faer::{
     MatMut, MatRef, Par,
     dyn_stack::{MemBuffer, MemStack, StackReq},
+    mat::AsMatMut,
     matrix_free::{BiLinOp, BiPrecond, IdentityPrecond, InitialGuessStatus, LinOp, lsmr},
 };
 use faer_ext::nalgebra::{DMatrixView, Dyn};
@@ -8,100 +9,22 @@ use std::{
     sync::Mutex,
     time::{Duration, Instant},
 };
-mod block_jacobi;
-use block_jacobi::BlockJacobi;
+mod preconditioner;
+use preconditioner::FactorPreconditioner;
 
 use crate::{
     EvaluationError, Real, SolverError,
+    linear_model::{
+        Jacobian, LinearizedModel, StepWorkspace, block_factors::BlockFactors, norm_l2, relative,
+    },
     optimization::{DampedLeastSquaresBackend, DampedStep, LeastSquaresBackend, norm_inf},
 };
 
-#[derive(Debug)]
-struct Block {
-    row: usize,
-    col: usize,
-    rows: usize,
-    cols: usize,
-    start: usize,
-}
-
-#[derive(Debug)]
-struct Jacobian<R> {
-    rows: usize,
-    cols: usize,
-    blocks: Vec<Block>,
-    values: Vec<R>,
-}
-
-impl<R: Real> LinOp<R> for Jacobian<R> {
-    fn nrows(&self) -> usize {
-        self.rows
-    }
-    fn ncols(&self) -> usize {
-        self.cols
-    }
-    fn apply_scratch(&self, _: usize, _: Par) -> StackReq {
-        StackReq::EMPTY
-    }
-    fn apply(&self, mut out: MatMut<'_, R>, rhs: MatRef<'_, R>, _: Par, _: &mut MemStack) {
-        assert_eq!(
-            (out.nrows(), rhs.nrows(), out.ncols()),
-            (self.rows, self.cols, rhs.ncols())
-        );
-        out.fill(R::zero());
-        for b in &self.blocks {
-            for k in 0..rhs.ncols() {
-                for j in 0..b.cols {
-                    let x = rhs[(b.col + j, k)];
-                    for i in 0..b.rows {
-                        out[(b.row + i, k)] += self.values[b.start + j * b.rows + i] * x;
-                    }
-                }
-            }
-        }
-    }
-    fn conj_apply(&self, out: MatMut<'_, R>, rhs: MatRef<'_, R>, par: Par, stack: &mut MemStack) {
-        self.apply(out, rhs, par, stack);
-    }
-}
-
-impl<R: Real> BiLinOp<R> for Jacobian<R> {
-    fn transpose_apply_scratch(&self, _: usize, _: Par) -> StackReq {
-        StackReq::EMPTY
-    }
-    fn transpose_apply(
-        &self,
-        mut out: MatMut<'_, R>,
-        rhs: MatRef<'_, R>,
-        _: Par,
-        _: &mut MemStack,
-    ) {
-        assert_eq!(
-            (out.nrows(), rhs.nrows(), out.ncols()),
-            (self.cols, self.rows, rhs.ncols())
-        );
-        out.fill(R::zero());
-        for b in &self.blocks {
-            for k in 0..rhs.ncols() {
-                for j in 0..b.cols {
-                    let mut sum = R::zero();
-                    for i in 0..b.rows {
-                        sum += self.values[b.start + j * b.rows + i] * rhs[(b.row + i, k)];
-                    }
-                    out[(b.col + j, k)] += sum;
-                }
-            }
-        }
-    }
-    fn adjoint_apply(
-        &self,
-        out: MatMut<'_, R>,
-        rhs: MatRef<'_, R>,
-        par: Par,
-        stack: &mut MemStack,
-    ) {
-        self.transpose_apply(out, rhs, par, stack);
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Preconditioning {
+    Identity,
+    Diagonal,
+    BlockJacobi,
 }
 
 /// Work performed since the most recent optimization/backend preparation.
@@ -214,25 +137,28 @@ impl<R: Real> LinOp<R> for Damped<'_, R> {
     fn ncols(&self) -> usize {
         self.jacobian.cols
     }
-    fn apply_scratch(&self, _: usize, _: Par) -> StackReq {
-        StackReq::EMPTY
+    fn apply_scratch(&self, rhs_ncols: usize, _: Par) -> StackReq {
+        if self.scales.is_some() {
+            faer::linalg::temp_mat_scratch::<R>(self.jacobian.cols, rhs_ncols)
+        } else {
+            StackReq::EMPTY
+        }
     }
     fn apply(&self, out: MatMut<'_, R>, rhs: MatRef<'_, R>, par: Par, stack: &mut MemStack) {
         let start = self.timings.map(|_| Instant::now());
-        let (mut top, mut bottom) = out.split_at_row_mut(self.jacobian.rows);
+        let (top, mut bottom) = out.split_at_row_mut(self.jacobian.rows);
         if let Some(scales) = self.scales {
-            top.fill(R::zero());
-            for b in &self.jacobian.blocks {
-                for k in 0..rhs.ncols() {
-                    for j in 0..b.cols {
-                        let x = rhs[(b.col + j, k)] / scales[b.col + j];
-                        for i in 0..b.rows {
-                            top[(b.row + i, k)] +=
-                                self.jacobian.values[b.start + j * b.rows + i] * x;
-                        }
-                    }
+            // Scale each input coordinate once, rather than once per incident
+            // Jacobian block. Scratch is retained by the surrounding LSMR solve.
+            let (mut scaled, stack) =
+                faer::linalg::temp_mat_zeroed::<R, _, _>(self.jacobian.cols, rhs.ncols(), stack);
+            let mut scaled = scaled.as_mat_mut();
+            for k in 0..rhs.ncols() {
+                for j in 0..self.jacobian.cols {
+                    scaled[(j, k)] = rhs[(j, k)] / scales[j];
                 }
             }
+            self.jacobian.apply(top, scaled.as_ref(), par, stack);
         } else {
             self.jacobian.apply(top, rhs, par, stack);
         }
@@ -380,6 +306,7 @@ pub struct Lsmr<R: Real = f64> {
     pub relative_tolerance: R,
     /// Scale damped solver coordinates by Jacobian column norms. Default: true.
     /// Does not change the damped objective; changes the inner stopping norm.
+    /// Mode changes require a new damping preparation before solving again.
     pub diagonal_preconditioning: bool,
     /// Use variable-block Jacobi for damped solves. Default: false.
     /// Implies diagonal scaling, regardless of `diagonal_preconditioning`.
@@ -391,20 +318,14 @@ pub struct Lsmr<R: Real = f64> {
     /// Optional allocation-free observer after each numerically attempted solve.
     /// Called on success and exhaustion, outside faer's inner loop. Default: None.
     pub on_solve: Option<fn(LsmrDiagnostics<R>)>,
-    jacobian: Jacobian<R>,
-    rhs: Vec<R>,
-    gradient: Vec<R>,
-    step: Vec<R>,
+    model: LinearizedModel<R>,
+    work: StepWorkspace<R>,
     scratch: Option<MemBuffer>,
-    scales: Vec<R>,
     diagonal: Vec<R>,
     augmented_rhs: Vec<R>,
-    product: Vec<R>,
-    stationarity: Vec<R>,
-    scaled_reference: Vec<R>,
-    block_jacobi: BlockJacobi<R>,
+    blocks: BlockFactors<R>,
     timings: Mutex<LsmrTimings>,
-    damping_ready: bool,
+    prepared_mode: Option<Preconditioning>,
     statistics: LsmrStatistics,
     diagnostics: LsmrDiagnostics<R>,
 }
@@ -419,25 +340,14 @@ impl<R: Real> Default for Lsmr<R> {
             block_preconditioning: false,
             collect_timings: false,
             on_solve: None,
-            jacobian: Jacobian {
-                rows: 0,
-                cols: 0,
-                blocks: Vec::new(),
-                values: Vec::new(),
-            },
-            rhs: Vec::new(),
-            gradient: Vec::new(),
-            step: Vec::new(),
+            model: LinearizedModel::default(),
+            work: StepWorkspace::default(),
             scratch: None,
-            scales: Vec::new(),
             diagonal: Vec::new(),
             augmented_rhs: Vec::new(),
-            product: Vec::new(),
-            stationarity: Vec::new(),
-            scaled_reference: Vec::new(),
-            block_jacobi: BlockJacobi::default(),
+            blocks: BlockFactors::default(),
             timings: Mutex::new(LsmrTimings::default()),
-            damping_ready: false,
+            prepared_mode: None,
             statistics: LsmrStatistics::default(),
             diagnostics: LsmrDiagnostics::default(),
         }
@@ -468,6 +378,97 @@ impl<R: Real> Lsmr<R> {
             ..Default::default()
         }
     }
+
+    fn requested_mode(&self) -> Preconditioning {
+        if self.block_preconditioning {
+            Preconditioning::BlockJacobi
+        } else if self.diagonal_preconditioning {
+            Preconditioning::Diagonal
+        } else {
+            Preconditioning::Identity
+        }
+    }
+
+    fn factor_preconditioner(&mut self, lambda: R, mode: Preconditioning) {
+        let start = self.collect_timings.then(Instant::now);
+        if mode == Preconditioning::BlockJacobi {
+            self.diagnostics.block_fallbacks = self.blocks.factor(lambda);
+        }
+        if let Some(start) = start {
+            self.timings.get_mut().unwrap().factorization += start.elapsed();
+        }
+    }
+
+    fn solve_damped_system(&mut self, mode: Preconditioning) -> Result<(), SolverError> {
+        let params = self.params();
+        let start = self.collect_timings.then(Instant::now);
+        let result = solve(
+            &Damped {
+                jacobian: &self.model.jacobian,
+                diagonal: &self.diagonal,
+                scales: (mode != Preconditioning::Identity).then_some(&self.model.scales),
+                timings: self.collect_timings.then_some(&self.timings),
+            },
+            FactorPreconditioner {
+                dimension: self.model.jacobian.cols,
+                factors: (mode == Preconditioning::BlockJacobi).then_some(&self.blocks),
+                timings: self.collect_timings.then_some(&self.timings),
+            },
+            &self.augmented_rhs,
+            &mut self.work.step,
+            params,
+            &mut self.scratch,
+            &mut self.statistics,
+            &mut self.diagnostics,
+        );
+        if let Some(start) = start {
+            self.timings.get_mut().unwrap().linear_solve += start.elapsed();
+        }
+        result
+    }
+
+    fn recover_and_verify(&mut self, lambda: R, mode: Preconditioning) -> Result<R, SolverError> {
+        let start = self.collect_timings.then(Instant::now);
+        // faer has already applied the block preconditioner to its solution;
+        // only diagonal scaling remains to recover original coordinates.
+        if mode != Preconditioning::Identity {
+            for (d, &s) in self.work.step.iter_mut().zip(&self.model.scales) {
+                *d /= s;
+            }
+        }
+        let verified = self.model.verify_step(&mut self.work, lambda);
+        self.diagnostics.finite_step = verified.finite_step;
+        if mode != Preconditioning::Identity {
+            self.work.scale_residual(&self.model.scales);
+        }
+        if mode == Preconditioning::BlockJacobi {
+            let n = self.model.jacobian.cols;
+            self.blocks.apply_factor_inverse(
+                MatMut::from_column_major_slice_mut(&mut self.work.normal_residual, n, 1),
+                true,
+            );
+            self.blocks.apply_factor_inverse(
+                MatMut::from_column_major_slice_mut(&mut self.work.reference, n, 1),
+                true,
+            );
+        }
+        let scaled_norm = norm_l2(&self.work.normal_residual);
+        let scaled_reference = norm_l2(&self.work.reference);
+        if let Some(start) = start {
+            self.timings.get_mut().unwrap().residual_checks += start.elapsed();
+        }
+        self.diagnostics.original_absolute_residual = Some(verified.residual_norm);
+        self.diagnostics.original_relative_residual =
+            Some(relative(verified.residual_norm, verified.reference_norm));
+        self.diagnostics.scaled_absolute_residual = Some(scaled_norm);
+        self.diagnostics.scaled_relative_residual = Some(relative(scaled_norm, scaled_reference));
+        if !verified.finite_step || !verified.residual_norm.is_finite() || !scaled_norm.is_finite()
+        {
+            self.diagnostics.termination = Some(LsmrTermination::NonFinite);
+            return Err(SolverError::LinearSolveFailed);
+        }
+        Ok(verified.predicted_reduction)
+    }
 }
 
 impl<R: Real> LeastSquaresBackend for Lsmr<R> {
@@ -477,23 +478,18 @@ impl<R: Real> LeastSquaresBackend for Lsmr<R> {
         self.statistics = LsmrStatistics::default();
         *self.timings.get_mut().unwrap() = LsmrTimings::default();
         self.diagnostics = LsmrDiagnostics::default();
-        self.damping_ready = false;
+        self.prepared_mode = None;
         if self.max_iterations == 0 || !(R::zero()..R::one()).contains(&self.relative_tolerance) {
             return Err(SolverError::InvalidOptions);
         }
-        self.jacobian.cols = dimension;
-        self.gradient.resize(dimension, R::zero());
-        self.step.resize(dimension, R::zero());
+        self.model.prepare(dimension);
+        self.work.step.resize(dimension, R::zero());
         Ok(())
     }
 
     fn clear(&mut self) {
-        self.damping_ready = false;
-        self.jacobian.rows = 0;
-        self.jacobian.blocks.clear();
-        self.jacobian.values.clear();
-        self.rhs.clear();
-        self.gradient.fill(R::zero());
+        self.prepared_mode = None;
+        self.model.clear();
     }
 
     fn accumulate<'a>(
@@ -501,48 +497,24 @@ impl<R: Real> LeastSquaresBackend for Lsmr<R> {
         residual: &[R],
         jacobians: impl Iterator<Item = (usize, DMatrixView<'a, R, Dyn, Dyn>)> + Clone,
     ) -> Result<(), EvaluationError> {
-        self.damping_ready = false;
-        let row = self.jacobian.rows;
-        self.jacobian.rows = row
-            .checked_add(residual.len())
-            .ok_or(EvaluationError::DimensionMismatch)?;
-        self.rhs.extend(residual.iter().map(|&r| -r));
-        for (col, matrix) in jacobians {
-            self.jacobian.blocks.push(Block {
-                row,
-                col,
-                rows: residual.len(),
-                cols: matrix.ncols(),
-                start: self.jacobian.values.len(),
-            });
-            // Pack explicitly: emitted views may have arbitrary strides.
-            for j in 0..matrix.ncols() {
-                let mut gradient = R::zero();
-                for i in 0..residual.len() {
-                    let value = matrix[(i, j)];
-                    self.jacobian.values.push(value);
-                    gradient += value * residual[i];
-                }
-                self.gradient[col + j] += gradient;
-            }
-        }
-        Ok(())
+        self.prepared_mode = None;
+        self.model.accumulate(residual, jacobians)
     }
 
     fn gradient_norm(&self) -> Result<R, SolverError> {
-        norm_inf(&self.gradient)
+        norm_inf(&self.model.gradient)
     }
 
     fn solve(&mut self) -> Result<&[R], SolverError> {
         self.diagnostics = LsmrDiagnostics::default();
         let params = self.params();
         let result = solve(
-            &self.jacobian,
+            &self.model.jacobian,
             IdentityPrecond {
-                dim: self.jacobian.cols,
+                dim: self.model.jacobian.cols,
             },
-            &self.rhs,
-            &mut self.step,
+            &self.model.negative_residual,
+            &mut self.work.step,
             params,
             &mut self.scratch,
             &mut self.statistics,
@@ -552,46 +524,30 @@ impl<R: Real> LeastSquaresBackend for Lsmr<R> {
             observe(self.diagnostics);
         }
         result?;
-        Ok(&self.step)
+        Ok(&self.work.step)
     }
 }
 
 impl<R: Real> DampedLeastSquaresBackend for Lsmr<R> {
     fn prepare_damping(&mut self, min_column_norm: R) -> Result<(), SolverError> {
         let start = self.collect_timings.then(Instant::now);
-        self.damping_ready = false;
-        if !min_column_norm.is_finite() || min_column_norm <= R::zero() {
-            return Err(SolverError::InvalidOptions);
-        }
-        let (m, n) = (self.jacobian.rows, self.jacobian.cols);
-        self.scales.resize(n, R::zero());
-        self.scales.fill(R::zero());
-        // Stable column norms, computed only once per accepted-state linearization.
-        for b in &self.jacobian.blocks {
-            for col in 0..b.cols {
-                let norm = &mut self.scales[b.col + col];
-                for row in 0..b.rows {
-                    *norm = norm.hypot(self.jacobian.values[b.start + col * b.rows + row]);
-                }
-            }
-        }
-        norm_inf(&self.scales)?;
-        for scale in &mut self.scales {
-            *scale = scale.max(min_column_norm);
-        }
+        self.prepared_mode = None;
+        self.model.prepare_scales(min_column_norm)?;
+        let mode = self.requested_mode();
+        let (m, n) = (self.model.jacobian.rows, self.model.jacobian.cols);
         self.diagonal.resize(n, R::zero());
-        self.product.resize(m, R::zero());
-        self.stationarity.resize(n, R::zero());
-        self.scaled_reference.resize(n, R::zero());
-        self.block_jacobi
-            .prepare(&self.jacobian, &self.scales, self.block_preconditioning)?;
+        self.work.prepare_verification(m, n);
+        if mode == Preconditioning::BlockJacobi {
+            self.blocks
+                .prepare(&self.model.jacobian, &self.model.scales)?;
+        }
         self.augmented_rhs.resize(
             m.checked_add(n).ok_or(EvaluationError::DimensionMismatch)?,
             R::zero(),
         );
-        self.augmented_rhs[..m].copy_from_slice(&self.rhs);
+        self.augmented_rhs[..m].copy_from_slice(&self.model.negative_residual);
         self.augmented_rhs[m..].fill(R::zero());
-        self.damping_ready = true;
+        self.prepared_mode = Some(mode);
         if let Some(start) = start {
             let t = self.timings.get_mut().unwrap();
             t.preparation += start.elapsed();
@@ -601,138 +557,34 @@ impl<R: Real> DampedLeastSquaresBackend for Lsmr<R> {
 
     fn solve_damped(&mut self, lambda: R) -> Result<DampedStep<'_, R>, SolverError> {
         self.diagnostics = LsmrDiagnostics::default();
-        if !self.damping_ready || !lambda.is_finite() || lambda < R::zero() {
+        let mode = self.prepared_mode.ok_or(SolverError::InvalidOptions)?;
+        if mode != self.requested_mode() || !lambda.is_finite() || lambda < R::zero() {
             return Err(SolverError::InvalidOptions);
         }
         let root = lambda.sqrt();
-        let scaled = self.diagonal_preconditioning || self.block_preconditioning;
+        let scaled = mode != Preconditioning::Identity;
         self.diagnostics.damping = Some(lambda);
-        self.diagnostics.min_scale = self.scales.iter().copied().reduce(|a, b| a.min(b));
-        self.diagnostics.max_scale = self.scales.iter().copied().reduce(|a, b| a.max(b));
-        for (d, &s) in self.diagonal.iter_mut().zip(&self.scales) {
+        self.diagnostics.min_scale = self.model.scales.iter().copied().reduce(|a, b| a.min(b));
+        self.diagnostics.max_scale = self.model.scales.iter().copied().reduce(|a, b| a.max(b));
+        for (d, &s) in self.diagonal.iter_mut().zip(&self.model.scales) {
             *d = if scaled { root } else { root * s };
         }
         if norm_inf(&self.diagonal).is_err() {
             self.diagnostics.termination = Some(LsmrTermination::NonFinite);
             return Err(SolverError::LinearSolveFailed);
         }
-        let params = self.params();
-        let start = self.collect_timings.then(Instant::now);
-        self.diagnostics.block_fallbacks = self.block_jacobi.factor(lambda);
-        self.block_jacobi.timed = self.collect_timings;
-        *self.block_jacobi.elapsed.get_mut().unwrap() = Duration::ZERO;
-        if let Some(start) = start {
-            let t = self.timings.get_mut().unwrap();
-            t.factorization += start.elapsed();
-        }
-        let start = self.collect_timings.then(Instant::now);
-        let result = solve(
-            &Damped {
-                jacobian: &self.jacobian,
-                diagonal: &self.diagonal,
-                scales: scaled.then_some(&self.scales),
-                timings: self.collect_timings.then_some(&self.timings),
-            },
-            &self.block_jacobi,
-            &self.augmented_rhs,
-            &mut self.step,
-            params,
-            &mut self.scratch,
-            &mut self.statistics,
-            &mut self.diagnostics,
-        );
-        if let Some(start) = start {
-            let t = self.timings.get_mut().unwrap();
-            t.linear_solve += start.elapsed();
-            t.preconditioner += *self.block_jacobi.elapsed.get_mut().unwrap();
-        }
-        self.block_jacobi.timed = false;
-        let start = self.collect_timings.then(Instant::now);
-        // faer returns the preconditioned-back solution in diagonally scaled
-        // coordinates; only D^-1 remains to recover the physical step.
-        if scaled {
-            for (d, &s) in self.step.iter_mut().zip(&self.scales) {
-                *d /= s;
-            }
-        }
-        self.diagnostics.finite_step = norm_inf(&self.step).is_ok();
-        let (m, n) = (self.jacobian.rows, self.jacobian.cols);
-        self.jacobian.apply(
-            MatMut::from_column_major_slice_mut(&mut self.product, m, 1),
-            MatRef::from_column_major_slice(&self.step, n, 1),
-            Par::Seq,
-            MemStack::new(&mut []),
-        );
-        let half = R::from_f64_impl(0.5);
-        let mut predicted_reduction = R::zero();
-        for (&g, &d) in self.gradient.iter().zip(&self.step) {
-            predicted_reduction -= g * d;
-        }
-        for &value in &self.product {
-            predicted_reduction -= (half * value) * value;
-        }
-        // Recompute stationarity independently of faer's recurrence, even on exhaustion.
-        for (value, &rhs) in self.product.iter_mut().zip(&self.rhs) {
-            *value -= rhs;
-        }
-        self.jacobian.transpose_apply(
-            MatMut::from_column_major_slice_mut(&mut self.stationarity, n, 1),
-            MatRef::from_column_major_slice(&self.product, m, 1),
-            Par::Seq,
-            MemStack::new(&mut []),
-        );
-        let (mut original, mut scaled_norm, mut reference, mut scaled_reference_norm) =
-            (R::zero(), R::zero(), R::zero(), R::zero());
-        for j in 0..n {
-            let s = self.scales[j];
-            let e = self.stationarity[j] + (lambda * (s * self.step[j])) * s;
-            let divisor = if scaled { s } else { R::one() };
-            original = original.hypot(e);
-            self.stationarity[j] = e / divisor;
-            reference = reference.hypot(self.gradient[j]);
-            self.scaled_reference[j] = self.gradient[j] / divisor;
-        }
-        self.block_jacobi.transform(
-            MatMut::from_column_major_slice_mut(&mut self.stationarity, n, 1),
-            true,
-        );
-        self.block_jacobi.transform(
-            MatMut::from_column_major_slice_mut(&mut self.scaled_reference, n, 1),
-            true,
-        );
-        for (&e, &g) in self.stationarity.iter().zip(&self.scaled_reference) {
-            scaled_norm = scaled_norm.hypot(e);
-            scaled_reference_norm = scaled_reference_norm.hypot(g);
-        }
-        if let Some(start) = start {
-            let t = self.timings.get_mut().unwrap();
-            t.residual_checks += start.elapsed();
-        }
-        self.diagnostics.original_absolute_residual = Some(original);
-        self.diagnostics.scaled_absolute_residual = Some(scaled_norm);
-        self.diagnostics.original_relative_residual = Some(if reference == R::zero() {
-            original
-        } else {
-            original / reference
-        });
-        self.diagnostics.scaled_relative_residual = Some(if scaled_reference_norm == R::zero() {
-            scaled_norm
-        } else {
-            scaled_norm / scaled_reference_norm
-        });
-        if !self.diagnostics.finite_step || !original.is_finite() || !scaled_norm.is_finite() {
-            self.diagnostics.termination = Some(LsmrTermination::NonFinite);
-            if let Some(observe) = self.on_solve {
-                observe(self.diagnostics);
-            }
-            return Err(SolverError::LinearSolveFailed);
-        }
+        self.factor_preconditioner(lambda, mode);
+        let result = self.solve_damped_system(mode);
+        // Even exhausted solves get independent residual diagnostics. Verification
+        // failures take precedence over the iterative termination status.
+        let verified = self.recover_and_verify(lambda, mode);
         if let Some(observe) = self.on_solve {
             observe(self.diagnostics);
         }
+        let predicted_reduction = verified?;
         result?;
         Ok(DampedStep {
-            delta: &self.step,
+            delta: &self.work.step,
             predicted_reduction,
         })
     }
@@ -746,6 +598,166 @@ mod tests {
     use faer_ext::nalgebra::{SMatrix, SVector};
 
     type Pair = crate::variable::test_support::Vector<2>;
+
+    #[test]
+    fn damped_products_match_dense_with_shared_columns_and_multiple_rhs() {
+        use faer_ext::nalgebra::DMatrix;
+        fn check<R: Real + Into<f64>>(tolerance: f64) {
+            let c = R::from_f64_impl;
+            let j = SMatrix::<R, 4, 3>::from_row_slice(
+                &[
+                    0.001, 2., 3., 0.002, -1., 4., -0.001, 3., -2., 0.003, 1., 2.,
+                ]
+                .map(c),
+            );
+            let mut backend = Lsmr::<R>::default();
+            backend.prepare(3).unwrap();
+            for row in [0, 2] {
+                backend
+                    .accumulate(
+                        &[c(0.), c(0.)],
+                        std::iter::once((0, j.fixed_rows::<2>(row).as_view())),
+                    )
+                    .unwrap();
+            }
+            backend.prepare_damping(c(0.1)).unwrap();
+            let x = Mat::from_fn(3, 2, |i, k| c((i + k) as f64 - 1.25));
+            let y = Mat::from_fn(7, 2, |i, k| c((2 * i + k) as f64 - 2.5));
+            for scaled in [false, true] {
+                for lambda in [0.0_f64, 0.01, 1e8] {
+                    let diagonal: Vec<_> = backend
+                        .model
+                        .scales
+                        .iter()
+                        .map(|&s| {
+                            if scaled {
+                                c(lambda.sqrt())
+                            } else {
+                                c(lambda.sqrt()) * s
+                            }
+                        })
+                        .collect();
+                    let operator = Damped {
+                        jacobian: &backend.model.jacobian,
+                        diagonal: &diagonal,
+                        scales: scaled.then_some(&backend.model.scales),
+                        timings: None,
+                    };
+                    let dense = DMatrix::from_fn(7, 3, |i, k| {
+                        if i < 4 {
+                            j[(i, k)].into()
+                                / if scaled {
+                                    backend.model.scales[k].into()
+                                } else {
+                                    1.
+                                }
+                        } else if i - 4 == k {
+                            diagonal[k].into()
+                        } else {
+                            0.
+                        }
+                    });
+                    let expected = &dense * DMatrix::from_fn(3, 2, |i, k| x[(i, k)].into());
+                    let expected_transpose =
+                        dense.transpose() * DMatrix::from_fn(7, 2, |i, k| y[(i, k)].into());
+                    let mut forward = Mat::zeros(7, 2);
+                    let mut transpose = Mat::zeros(3, 2);
+                    let mut scratch = MemBuffer::new(operator.apply_scratch(2, Par::Seq));
+                    for conjugate in [false, true] {
+                        if conjugate {
+                            operator.conj_apply(
+                                forward.as_mut(),
+                                x.as_ref(),
+                                Par::Seq,
+                                MemStack::new(&mut scratch),
+                            );
+                            operator.adjoint_apply(
+                                transpose.as_mut(),
+                                y.as_ref(),
+                                Par::Seq,
+                                MemStack::new(&mut scratch),
+                            );
+                        } else {
+                            operator.apply(
+                                forward.as_mut(),
+                                x.as_ref(),
+                                Par::Seq,
+                                MemStack::new(&mut scratch),
+                            );
+                            operator.transpose_apply(
+                                transpose.as_mut(),
+                                y.as_ref(),
+                                Par::Seq,
+                                MemStack::new(&mut scratch),
+                            );
+                        }
+                        for k in 0..2 {
+                            for i in 0..7 {
+                                assert!(
+                                    (forward[(i, k)].into() - expected[(i, k)]).abs()
+                                        < tolerance * expected[(i, k)].abs().max(1.)
+                                );
+                            }
+                            for i in 0..3 {
+                                assert!(
+                                    (transpose[(i, k)].into() - expected_transpose[(i, k)]).abs()
+                                        < tolerance * expected_transpose[(i, k)].abs().max(1.)
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        check::<f64>(1e-12);
+        check::<f32>(1e-5);
+    }
+
+    #[test]
+    fn prepared_modes_reject_stale_configuration_and_observe_attempts_once() {
+        std::thread_local! { static OBSERVED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+        OBSERVED.with(|n| n.set(0));
+        let mut backend = Lsmr::default();
+        backend.block_preconditioning = true;
+        backend.on_solve = Some(|_| OBSERVED.with(|n| n.set(n.get() + 1)));
+        backend.prepare(2).unwrap();
+        let j = SMatrix::<f64, 2, 2>::new(1., 0., 0., 3.);
+        backend
+            .accumulate(&[-1., -1.], std::iter::once((0, j.as_view())))
+            .unwrap();
+        backend.prepare_damping(0.1).unwrap();
+        backend.block_preconditioning = false;
+        assert!(matches!(
+            backend.solve_damped(1.),
+            Err(SolverError::InvalidOptions)
+        ));
+        assert_eq!(OBSERVED.with(|n| n.get()), 0);
+        backend.prepare_damping(0.1).unwrap();
+        let step = backend.solve_damped(1.).unwrap().delta;
+        assert!((step[0] - 0.5).abs() < 1e-12 && (step[1] - 1. / 6.).abs() < 1e-12);
+        assert_eq!(OBSERVED.with(|n| n.get()), 1);
+        backend.diagonal_preconditioning = false;
+        assert!(matches!(
+            backend.solve_damped(1.),
+            Err(SolverError::InvalidOptions)
+        ));
+        backend.prepare_damping(0.1).unwrap();
+        backend.max_iterations = 1;
+        assert!(matches!(
+            backend.solve_damped(1.),
+            Err(SolverError::LinearSolveFailed)
+        ));
+        assert_eq!(
+            backend.diagnostics().termination,
+            Some(LsmrTermination::IterationLimit)
+        );
+        assert_eq!(OBSERVED.with(|n| n.get()), 2);
+        backend.clear();
+        assert!(matches!(
+            backend.solve_damped(1.),
+            Err(SolverError::InvalidOptions)
+        ));
+    }
 
     #[test]
     fn mixed_scale_damping_matches_svd_and_exposes_exhaustion() {
@@ -769,7 +781,7 @@ mod tests {
                     .view_mut((0, 0), (3, 4))
                     .copy_from(&j.map(Into::into));
                 for k in 0..4 {
-                    augmented[(3 + k, k)] = f64::sqrt(lambda) * backend.scales[k].into();
+                    augmented[(3 + k, k)] = f64::sqrt(lambda) * backend.model.scales[k].into();
                 }
                 let mut rhs = DVector::zeros(7);
                 rhs.rows_mut(0, 3).copy_from(&(-r.map(Into::into)));
@@ -896,7 +908,7 @@ mod tests {
             let mut augmented = DMatrix::zeros(9, 5);
             augmented.view_mut((0, 0), (4, 5)).copy_from(&j);
             for k in 0..5 {
-                augmented[(4 + k, k)] = f64::sqrt(lambda) * backend.scales[k];
+                augmented[(4 + k, k)] = f64::sqrt(lambda) * backend.model.scales[k];
             }
             let mut rhs = DVector::zeros(9);
             rhs.rows_mut(0, 4).copy_from(&(-r));
@@ -910,10 +922,13 @@ mod tests {
             let y = Mat::from_fn(5, 2, |i, k| (2 * i + k) as f64 + 1.);
             let mut px = Mat::zeros(5, 2);
             let mut pty = Mat::zeros(5, 2);
-            backend
-                .block_jacobi
-                .apply(px.as_mut(), x.as_ref(), Par::Seq, MemStack::new(&mut []));
-            backend.block_jacobi.transpose_apply(
+            let preconditioner = FactorPreconditioner {
+                dimension: 5,
+                factors: Some(&backend.blocks),
+                timings: None,
+            };
+            preconditioner.apply(px.as_mut(), x.as_ref(), Par::Seq, MemStack::new(&mut []));
+            preconditioner.transpose_apply(
                 pty.as_mut(),
                 y.as_ref(),
                 Par::Seq,
@@ -1018,16 +1033,21 @@ mod tests {
                 transpose.fill(f64::NAN);
                 if conjugate {
                     solver
+                        .model
                         .jacobian
                         .conj_apply(forward.as_mut(), x.as_ref(), Par::Seq, stack);
-                    solver
-                        .jacobian
-                        .adjoint_apply(transpose.as_mut(), y.as_ref(), Par::Seq, stack);
+                    solver.model.jacobian.adjoint_apply(
+                        transpose.as_mut(),
+                        y.as_ref(),
+                        Par::Seq,
+                        stack,
+                    );
                 } else {
                     solver
+                        .model
                         .jacobian
                         .apply(forward.as_mut(), x.as_ref(), Par::Seq, stack);
-                    solver.jacobian.transpose_apply(
+                    solver.model.jacobian.transpose_apply(
                         transpose.as_mut(),
                         y.as_ref(),
                         Par::Seq,

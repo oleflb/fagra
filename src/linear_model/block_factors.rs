@@ -1,11 +1,9 @@
-use super::*;
+use super::Jacobian;
+use crate::{EvaluationError, Real, SolverError, optimization::norm_inf};
 use faer::{
+    MatMut, MatRef, Par,
+    dyn_stack::{MemBuffer, MemStack},
     linalg::{cholesky::llt, triangular_solve},
-    matrix_free::{BiPrecond, Precond},
-};
-use std::{
-    sync::Mutex,
-    time::{Duration, Instant},
 };
 
 #[derive(Debug)]
@@ -16,58 +14,40 @@ struct VariableBlock {
     fallback: bool,
 }
 
-/// Factors normalized local Gram blocks, then applies L^-T (or its transpose).
-pub(super) struct BlockJacobi<R> {
-    dimension: usize,
-    enabled: bool,
+/// Normalized local Gram matrices and their reusable Cholesky factors.
+pub(crate) struct BlockFactors<R> {
     blocks: Vec<VariableBlock>,
     owners: Vec<usize>,
     gram: Vec<R>,
     factors: Vec<R>,
     scratch: Option<MemBuffer>,
-    pub timed: bool,
-    pub elapsed: Mutex<Duration>,
 }
 
-impl<R: std::fmt::Debug> std::fmt::Debug for BlockJacobi<R> {
+impl<R: std::fmt::Debug> std::fmt::Debug for BlockFactors<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BlockJacobi")
+        f.debug_struct("BlockFactors")
             .field("blocks", &self.blocks)
             .finish_non_exhaustive()
     }
 }
 
-impl<R: Real> Default for BlockJacobi<R> {
+impl<R: Real> Default for BlockFactors<R> {
     fn default() -> Self {
         Self {
-            dimension: 0,
-            enabled: false,
             blocks: Vec::new(),
             owners: Vec::new(),
             gram: Vec::new(),
             factors: Vec::new(),
             scratch: None,
-            timed: false,
-            elapsed: Mutex::new(Duration::ZERO),
         }
     }
 }
 
-impl<R: Real> BlockJacobi<R> {
-    pub fn prepare(
-        &mut self,
-        jacobian: &Jacobian<R>,
-        scales: &[R],
-        enabled: bool,
-    ) -> Result<(), SolverError> {
-        self.dimension = jacobian.cols;
-        self.enabled = enabled;
+impl<R: Real> BlockFactors<R> {
+    pub fn prepare(&mut self, jacobian: &Jacobian<R>, scales: &[R]) -> Result<(), SolverError> {
         self.blocks.clear();
         self.gram.clear();
-        if !enabled {
-            return Ok(());
-        }
-        self.owners.resize(self.dimension, usize::MAX);
+        self.owners.resize(jacobian.cols, usize::MAX);
         self.owners.fill(usize::MAX);
         for b in &jacobian.blocks {
             if b.cols == 0 {
@@ -76,7 +56,7 @@ impl<R: Real> BlockJacobi<R> {
             let end = b
                 .col
                 .checked_add(b.cols)
-                .filter(|&end| end <= self.dimension)
+                .filter(|&end| end <= jacobian.cols)
                 .ok_or(EvaluationError::DimensionMismatch)?;
             let owner = self.owners[b.col];
             let id = if owner == usize::MAX {
@@ -131,9 +111,6 @@ impl<R: Real> BlockJacobi<R> {
     }
 
     pub fn factor(&mut self, lambda: R) -> usize {
-        if !self.enabled {
-            return 0;
-        }
         self.factors.copy_from_slice(&self.gram);
         let mut fallbacks = 0;
         for b in &mut self.blocks {
@@ -160,11 +137,9 @@ impl<R: Real> BlockJacobi<R> {
         fallbacks
     }
 
-    pub fn transform(&self, mut rhs: MatMut<'_, R>, transpose: bool) {
-        if !self.enabled {
-            return;
-        }
-        let start = self.timed.then(Instant::now);
+    /// Apply L^-T, or L^-1 when transposed. Failed blocks remain identity,
+    /// suitable for preconditioning but not for exact elimination.
+    pub fn apply_factor_inverse(&self, mut rhs: MatMut<'_, R>, transpose: bool) {
         for b in &self.blocks {
             // Identity in normalized coordinates = the existing diagonal preconditioner.
             if b.fallback {
@@ -182,80 +157,57 @@ impl<R: Real> BlockJacobi<R> {
                 triangular_solve::solve_upper_triangular_in_place(l.transpose(), part, Par::Seq);
             }
         }
-        if let Some(start) = start {
-            *self.elapsed.lock().unwrap() += start.elapsed();
-        }
     }
-}
 
-impl<R: Real> LinOp<R> for BlockJacobi<R> {
-    fn nrows(&self) -> usize {
-        self.dimension
+    /// Read-only lower-triangular Gram views and their coordinate offsets.
+    pub fn gram_blocks(&self) -> impl Iterator<Item = (usize, MatRef<'_, R>)> {
+        self.blocks.iter().map(|b| {
+            (
+                b.col,
+                MatRef::from_column_major_slice(
+                    &self.gram[b.start..b.start + b.width * b.width],
+                    b.width,
+                    b.width,
+                ),
+            )
+        })
     }
-    fn ncols(&self) -> usize {
-        self.dimension
-    }
-    fn apply_scratch(&self, _: usize, _: Par) -> StackReq {
-        StackReq::EMPTY
-    }
-    fn apply(&self, mut out: MatMut<'_, R>, rhs: MatRef<'_, R>, _: Par, _: &mut MemStack) {
-        out.copy_from(rhs);
-        self.transform(out, false);
-    }
-    fn conj_apply(&self, out: MatMut<'_, R>, rhs: MatRef<'_, R>, par: Par, stack: &mut MemStack) {
-        self.apply(out, rhs, par, stack);
-    }
-}
-impl<R: Real> BiLinOp<R> for BlockJacobi<R> {
-    fn transpose_apply_scratch(&self, _: usize, _: Par) -> StackReq {
-        StackReq::EMPTY
-    }
-    fn transpose_apply(
-        &self,
-        mut out: MatMut<'_, R>,
-        rhs: MatRef<'_, R>,
-        _: Par,
-        _: &mut MemStack,
-    ) {
-        out.copy_from(rhs);
-        self.transform(out, true);
-    }
-    fn adjoint_apply(
-        &self,
-        out: MatMut<'_, R>,
-        rhs: MatRef<'_, R>,
-        par: Par,
-        stack: &mut MemStack,
-    ) {
-        self.transpose_apply(out, rhs, par, stack);
-    }
-}
-impl<R: Real> Precond<R> for BlockJacobi<R> {
-    fn apply_in_place_scratch(&self, _: usize, _: Par) -> StackReq {
-        StackReq::EMPTY
-    }
-    fn apply_in_place(&self, rhs: MatMut<'_, R>, _: Par, _: &mut MemStack) {
-        self.transform(rhs, false);
-    }
-    fn conj_apply_in_place(&self, rhs: MatMut<'_, R>, par: Par, stack: &mut MemStack) {
-        self.apply_in_place(rhs, par, stack);
-    }
-}
-impl<R: Real> BiPrecond<R> for BlockJacobi<R> {
-    fn transpose_apply_in_place_scratch(&self, _: usize, _: Par) -> StackReq {
-        StackReq::EMPTY
-    }
-    fn transpose_apply_in_place(&self, rhs: MatMut<'_, R>, _: Par, _: &mut MemStack) {
-        self.transform(rhs, true);
-    }
-    fn adjoint_apply_in_place(&self, rhs: MatMut<'_, R>, par: Par, stack: &mut MemStack) {
-        self.transpose_apply_in_place(rhs, par, stack);
+
+    /// Apply the inverse damped normal blocks within a coordinate range. The
+    /// caller must reject failed factors; preconditioning fallback is not exact.
+    pub fn solve_normal(&self, mut rhs: MatMut<'_, R>, offset: usize, lambda: R) {
+        for b in &self.blocks {
+            if b.col < offset || b.col >= offset + rhs.nrows() {
+                continue;
+            }
+            debug_assert!(!b.fallback);
+            let l = MatRef::from_column_major_slice(
+                &self.factors[b.start..b.start + b.width * b.width],
+                b.width,
+                b.width,
+            );
+            let mut part = rhs.as_mut().subrows_mut(b.col - offset, b.width);
+            triangular_solve::solve_lower_triangular_in_place(l, part.as_mut(), Par::Seq);
+            triangular_solve::solve_upper_triangular_in_place(l.transpose(), part, Par::Seq);
+        }
+        for i in 0..rhs.nrows() {
+            if self.owners[offset + i] == usize::MAX {
+                for k in 0..rhs.ncols() {
+                    // Unobserved coordinates have no RHS/couplings. At lambda=0,
+                    // preserve their zero minimum-norm increment.
+                    if lambda != R::zero() {
+                        rhs[(i, k)] /= lambda;
+                    }
+                }
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linear_model::Block;
     #[test]
     fn singular_and_nonfinite_blocks_fall_back_and_overlaps_are_rejected() {
         let mut j = Jacobian {
@@ -270,11 +222,11 @@ mod tests {
             }],
             values: vec![1., 1.],
         };
-        let mut p = BlockJacobi::default();
-        p.prepare(&j, &[1., 1., 1.], true).unwrap();
+        let mut p = BlockFactors::default();
+        p.prepare(&j, &[1., 1., 1.]).unwrap();
         assert_eq!(p.factor(0.), 1);
         let mut v = [2., 3., 4.];
-        p.transform(MatMut::from_column_major_slice_mut(&mut v, 3, 1), false);
+        p.apply_factor_inverse(MatMut::from_column_major_slice_mut(&mut v, 3, 1), false);
         assert_eq!(v, [2., 3., 4.]);
         assert_eq!(p.factor(0.01), 0);
         p.gram[0] = f64::INFINITY;
@@ -286,9 +238,9 @@ mod tests {
             cols: 2,
             start: 0,
         });
-        assert!(p.prepare(&j, &[1., 1., 1.], true).is_err());
+        assert!(p.prepare(&j, &[1., 1., 1.]).is_err());
         j.blocks.clear();
-        p.prepare(&j, &[1., 1., 1.], true).unwrap();
+        p.prepare(&j, &[1., 1., 1.]).unwrap();
         assert_eq!(p.factor(0.1), 0);
     }
 }

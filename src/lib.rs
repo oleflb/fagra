@@ -67,12 +67,14 @@ mod dense;
 mod error;
 mod factors;
 mod key;
+mod linear_model;
 mod linearization;
 mod lsmr;
 mod marginalization;
 mod normal;
 mod optimization;
 mod real;
+mod schur;
 mod solver;
 mod states;
 mod storage;
@@ -93,6 +95,7 @@ pub use optimization::{
     TerminationReason, TrialFailure,
 };
 pub use real::Real;
+pub use schur::{Schur, SchurDiagnostics, SchurStatistics, SchurTermination, SchurTimings};
 pub use solver::Solver;
 pub use states::StateStore;
 pub use variable::{Jacobian, Tangent, Variable};

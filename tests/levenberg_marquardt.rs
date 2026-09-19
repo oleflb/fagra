@@ -598,6 +598,50 @@ fn warmed_lm_retries_and_graph_switching_allocate_nothing() {
 }
 
 #[test]
+fn schur_reuses_warm_workspace_and_converges_on_fresh_graphs() {
+    let mut lm = LevenbergMarquardt::new(fagra::Schur::new(1, 1, 1));
+    for sample in 0..4 {
+        let mut graph = Solver::<States<f64>, Factors<f64>>::new();
+        let a = graph.add(Scalar(0.));
+        let b = graph.add(Scalar(0.));
+        let reset = Rc::new(Cell::new(true));
+        for (key, target, offset) in [(a, 1., -0.5), (b, 2., 1.)] {
+            graph
+                .add_factor(Curve {
+                    key,
+                    target,
+                    offset,
+                    kind: Kind::Square,
+                    reset: reset.clone(),
+                    calls: Rc::new(Calls::default()),
+                    malformed: false,
+                })
+                .unwrap();
+        }
+        graph
+            .add_factor(Link {
+                a,
+                b,
+                difference: 1.,
+                reset: reset.clone(),
+            })
+            .unwrap();
+        // Prepare graph-owned trial capacity and reset to identical initial values.
+        graph.optimize().unwrap();
+        reset.set(false);
+        let (result, allocations, _) =
+            measured(|| graph.optimize_with(&mut lm, &Default::default()));
+        let report = result.unwrap();
+        assert!(report.final_cost < 1e-12);
+        assert!((graph.get(a).unwrap().0 - 1.).abs() < 1e-8);
+        assert!((graph.get(b).unwrap().0 - 2.).abs() < 1e-8);
+        if sample > 0 {
+            assert_eq!(allocations, 0);
+        }
+    }
+}
+
+#[test]
 #[ignore = "release GN/LM comparison; run with --ignored --nocapture --test-threads=1"]
 fn benchmark() {
     println!(

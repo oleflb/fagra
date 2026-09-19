@@ -31,6 +31,9 @@ pub enum EvaluationError {
     /// Factor scopes or emitted variable identities are invalid.
     #[error("invalid factor scope or emitted variable identity")]
     InvalidEmission,
+    /// The selected backend cannot represent the emitted variable coupling.
+    #[error("residual structure is unsupported by the selected backend")]
+    UnsupportedStructure,
 }
 
 /// Failure to edit, evaluate, or optimize a graph.
