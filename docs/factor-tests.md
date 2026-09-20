@@ -171,3 +171,39 @@ report shrunk fixtures. Run a property directly with
 `testing::check_factor::<PriorCase, f64>(testing::FactorProperty::Jacobians)` or
 `testing::check_factor_batch`. These are consistency checks over the generated
 domain; keep independent reference cases for the intended measurement model.
+
+## Robust local models
+
+IRLS factors evaluate the true robust cost but emit a frozen-weight least-squares
+model. The emitted weighted residual's derivative across evaluations generally
+differs from its emitted Jacobian, and half its squared norm need not equal cost.
+Do not use the ordinary `Cost`/`Jacobians` suite on that weighted model.
+
+Instead, register a normal test that invokes:
+
+```rust,ignore
+fagra::testing::check_factor::<HuberCase, f64>(
+    fagra::testing::FactorProperty::LocalModel,
+);
+fagra::testing::check_factor_batch::<HuberBatchCase, f64>(
+    fagra::testing::FactorProperty::LocalModel,
+);
+```
+
+`LocalModel` checks finite nonnegative cost, matching real/dual values, valid
+emissions, and the true cost derivative against the emitted `Jᵀr` in every tangent
+direction. Batch tests exercise full, empty, and singleton selections, require
+zero cost for the empty selection, and compare full cost with the sum of singleton
+costs. This also checks additive constants, which gradient checks cannot detect.
+Weights may carry dual derivatives during testing; those derivatives are deliberately
+not used as the reference for the frozen-weight local Jacobian.
+
+Also test the **raw whitened residual** with `Jacobians`, and independently check
+the robust cost, blockwise weights, and `Jᵀ W J`. Gradient consistency alone cannot
+distinguish IRLS from another local model with the same gradient. Include zero
+residuals, inliers, outliers, and threshold cases. Avoid evaluating `sqrt(0)` on
+dual numbers when the quadratic branch needs only a squared norm.
+
+[tests/robust.rs](../tests/robust.rs) demonstrates these checks for a user-defined
+2D Huber factor and a batch in both precisions, along with covariance and
+marginalization checks against the frozen weighted model.

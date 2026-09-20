@@ -10,6 +10,8 @@ and read estimates through typed keys.
 and batched factor insertion, cost evaluation, removal, and Gauss–Newton and
 Levenberg–Marquardt optimization work. Bulk square-root marginalization replaces selected states and
 their incident factors with internal manifold priors.
+Checked estimate replacement, selected joint covariance, and user-defined robust
+IRLS local models are supported.
 
 ## Quick start: one scalar and one prior
 
@@ -185,6 +187,82 @@ Before optimization, this example's initial estimate is `0.0` and its prior cost
 is `4.5`; after one GN step, the estimate is `3.0` and cost is zero.
 Handles survive storage growth and compaction. Removed handles are rejected even
 after their slots are reused, and keys from another solver are rejected.
+
+Use `solver.set(x, replacement)?` to replace an estimate while preserving its key,
+attached factors, and historical marginal-prior anchors. This validates the key;
+the application remains responsible for constructing valid variable values.
+
+## Selected joint covariance
+
+```rust,ignore
+let blocks = [start.block_id(), end.block_id(), alignment.block_id()];
+let covariance = solver.joint_covariance(&blocks)?;
+```
+
+The matrix concatenates the requested right-tangent coordinates in that order,
+including cross-correlations and the information retained by marginalized history.
+It includes ordinary factors, batches, and internal priors, excludes optimizer
+damping, and rejects invalid or numerically singular information. Every live
+coordinate must be observable, including unselected variables. Duplicate blocks
+are rejected; an empty selection still checks the full information matrix.
+
+For the tracking hot path, reuse the final optimizer model within the same call:
+
+```rust,ignore
+let (report, covariance) = solver.optimize_with_covariance(
+    &mut method,
+    &fagra::OptimizeOptions::default(),
+    &blocks,
+    &fagra::CovarianceOptions::default(),
+)?;
+```
+
+This supports GN with dense Cholesky, LSMR, or Schur, and LM with LSMR or Schur.
+Successful LM convergence already has current Jacobians; extraction does not
+evaluate factors again. GN refreshes after cost-based termination if necessary.
+Covariance failure preserves accepted estimates. The standalone query always
+evaluates a fresh model without optimizing or moving estimates.
+
+Both return a borrowed `faer::MatRef` backed by reusable solver storage. Warmed
+calls within retained capacities allocate no library heap memory; user evaluators
+and geometry must also avoid allocations. Call `.to_owned()` only when an owned
+copy is needed beyond the next mutable use of the solver.
+
+Extraction factors the undamped information `H = L Lᵀ`, solves `L Y = E` for the
+selected coordinate columns, and returns `Yᵀ Y`; it never forms the full inverse.
+Dense GN reuses its current factorization when available. LSMR/Schur assemble
+dense information from their cached, unscaled Jacobians once at extraction time.
+This implementation uses **O(n²) storage and O(n³) factorization**, even for small
+selections; selected extraction costs O(n² k + n k²). It is intended for bounded
+windows, not as a sparse covariance backend for arbitrarily large graphs.
+
+`joint_covariance_with(&blocks, &options)` accepts explicit rank controls. The
+default rejects normalized squared Cholesky pivots at or below `64 * epsilon`.
+This ordering-dependent numerical rank screen is not a condition-number estimate.
+No damping, diagonal repair, or pseudoinverse is substituted for singular information.
+
+## User-defined robust factors
+
+Implement the true robust objective in `cost()` and its frozen-weight local model
+in `linearize()`. For blockwise Huber, with whitened residual norm `s` and threshold
+`d > 0`, use cost `s²/2` for `s <= d`, otherwise `d * (s - d/2)`. Emit
+`sqrt(w) * r` and `sqrt(w) * J`, where `w = 1` inside the threshold and `w = d/s`
+outside. Apply one weight per observation (for example a 2D pixel or 6D odometry
+residual), to all its Jacobian blocks. Do not differentiate the weight in that model.
+
+The true cost gradient must equal the emitted `Jᵀr`. LM uses active factors' true
+costs for trial acceptance. Marginalization absorbs the weighted local model and
+never robustifies the resulting prior again. It does not infer or retain the
+additive difference between true robust cost and weighted row cost. Reported costs
+thereafter use the retained surrogate objective, up to that omitted additive robust
+constant; states, local gradients, information, and covariance are unaffected by
+the constant. The existing irreducible least-squares constant produced by QR is
+still retained. Covariance uses inverse IRLS information, not a robust sandwich
+estimator.
+
+No graph-level loss registration or built-in loss helper is necessary. See the
+user-defined implementation and checks in [tests/robust.rs](tests/robust.rs), and
+the [robust-factor testing guide](docs/factor-tests.md#robust-local-models).
 
 ## Scalar precision
 

@@ -143,6 +143,14 @@ pub enum FactorProperty {
     Cost,
     /// Emitted Jacobians versus dual residual derivatives in right coordinates.
     Jacobians,
+    /// True nonlinear cost gradient versus the emitted `Jᵀr`, including IRLS.
+    ///
+    /// Checks finite nonnegative costs, real/dual values, batch selections, and
+    /// first-order consistency. Batch costs must be zero for empty selections and
+    /// additive across singletons. Does not differentiate emitted weighted residuals
+    /// or assert that their squared norm equals cost. Test raw residual derivatives
+    /// and the prescribed weighting/curvature independently.
+    LocalModel,
 }
 
 struct Residual<R> {
@@ -331,9 +339,17 @@ fn batch<T: TestFactorBatch, R: RealField + Copy>(
     Ok(sink.finish(cost))
 }
 
-fn cost<R: TestScalar>(value: R, capture: &Capture<R>, t: Tolerance) -> TestCaseResult {
+fn cost<R: TestScalar>(
+    value: R,
+    capture: &Capture<R>,
+    t: Tolerance,
+    local: bool,
+) -> TestCaseResult {
     let value = value.test_value();
     prop_assert!(value.is_finite() && value >= 0.0, "invalid cost: {value:?}");
+    if local {
+        return Ok(());
+    }
     let expected = capture
         .scopes
         .iter()
@@ -352,6 +368,7 @@ fn dual<R: TestScalar>(
     dual: &Capture<R::Dual>,
     seed: Option<(usize, usize)>,
     t: Tolerance,
+    local: bool,
 ) -> TestCaseResult {
     prop_assert_eq!(
         &real.widths,
@@ -377,8 +394,10 @@ fn dual<R: TestScalar>(
             });
             let label = format!("factor {:?}, row {index}, seed {seed:?}", scope.id);
             near(t, &format!("{label} value"), primal, value)?;
-            near(t, &format!("{label} derivative"), slope, expected)?;
-            cost_derivative += value * slope;
+            if !local {
+                near(t, &format!("{label} derivative"), slope, expected)?;
+            }
+            cost_derivative += value * expected;
         }
     }
     let (primal, slope) = R::parts(dual_cost);
@@ -455,12 +474,14 @@ fn run<T: Debug, R: TestScalar>(
             let failure = |e| TestCaseError::fail(format!("{property:?} evaluation: {e}"));
             let (full_cost, full) =
                 real(&case, &mut new_states(), Selection::All).map_err(failure)?;
-            cost(full_cost, &full, t)?;
+            let local = property == FactorProperty::LocalModel;
+            cost(full_cost, &full, t, local)?;
             let mut selections = vec![Selection::All];
             if batched {
                 selections.push(Selection::Empty);
                 selections.extend((0..full.scopes.len()).map(Selection::One));
             }
+            let mut singleton_cost = 0.0;
             for selected in selections {
                 let partial;
                 let (real_cost, capture) = if matches!(selected, Selection::All) {
@@ -468,12 +489,17 @@ fn run<T: Debug, R: TestScalar>(
                 } else {
                     let (value, sink) =
                         real(&case, &mut new_states(), selected).map_err(failure)?;
-                    cost(value, &sink, t)?;
+                    cost(value, &sink, t, local)?;
                     selection(&full, &sink, t)?;
                     partial = sink;
                     (value, &partial)
                 };
-                if property == FactorProperty::Jacobians {
+                match selected {
+                    Selection::Empty => near(t, "empty batch cost", real_cost.test_value(), 0.0)?,
+                    Selection::One(_) => singleton_cost += real_cost.test_value(),
+                    Selection::All => {}
+                }
+                if property != FactorProperty::Cost {
                     let seeds = std::iter::once(None).chain(
                         capture
                             .widths
@@ -490,9 +516,17 @@ fn run<T: Debug, R: TestScalar>(
                         };
                         let (value, sink) =
                             dual_evaluate(&case, &mut states, selected).map_err(failure)?;
-                        dual(real_cost, capture, value, &sink, seed, t)?;
+                        dual(real_cost, capture, value, &sink, seed, t, local)?;
                     }
                 }
+            }
+            if batched {
+                near(
+                    t,
+                    "full vs summed singleton costs",
+                    full_cost.test_value(),
+                    singleton_cost,
+                )?;
             }
             Ok(())
         })

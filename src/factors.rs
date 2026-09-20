@@ -23,10 +23,14 @@ pub trait Factor<S> {
     /// This describes incidence, not a dense clique in the numerical system.
     fn visit_variables(&self, visitor: impl FnMut(BlockId));
 
-    /// Evaluate `0.5 * sum(squared whitened residuals)` without Jacobians.
+    /// Evaluate the finite, nonnegative nonlinear objective without Jacobians.
     ///
-    /// The objective must match [`linearize`](Self::linearize). Report invalid
-    /// model evaluations rather than silently dropping measurements.
+    /// Ordinary least squares uses `0.5 * sum(squared whitened residuals)`.
+    /// Robust factors may instead evaluate a robust objective and emit its frozen-
+    /// weight IRLS model in [`linearize`](Self::linearize). The emitted model must
+    /// have gradient `Jᵀr` equal to this objective's derivative in right coordinates;
+    /// its value may differ by an additive constant. Report invalid evaluations
+    /// rather than silently dropping measurements.
     fn cost(&self, states: &S) -> Result<Self::Scalar, EvaluationError>;
 
     /// Emit residuals and Jacobians into an already established factor scope.
@@ -34,6 +38,23 @@ pub trait Factor<S> {
     /// Do not call [`LinearizationSink::factor`] here: the solver owns this scope.
     /// See [factor scopes](crate::LinearizationSink#factor-scopes) for a comparison
     /// with batch emission.
+    ///
+    /// For blockwise Huber with whitened residual `r`, norm `s`, and threshold `d > 0`,
+    /// `cost` is `s²/2` for `s <= d`, otherwise `d * (s - d/2)`. Emit `sqrt(w) * r`
+    /// and `sqrt(w) * J` for every associated Jacobian, where `w = 1` for `s <= d`
+    /// and `w = d/s` otherwise. Compute one weight per observation block, not per
+    /// coordinate or entire batch. Do not differentiate the weight in this local
+    /// model. Marginalization absorbs these rows with frozen weights; it does not
+    /// robustify the resulting prior again or infer the additive difference between
+    /// true robust cost and weighted row cost. Subsequent reported costs use the
+    /// retained surrogate objective, omitting that additive robust constant.
+    /// QR's irreducible least-squares constant is retained. The omitted constant
+    /// does not affect the local model's gradient, information, or covariance.
+    ///
+    /// Test raw residual derivatives separately. For robust models use
+    /// `testing::FactorProperty::LocalModel` to check the true cost gradient against
+    /// `Jᵀr`, and independently verify the intended weighting/curvature. Ordinary
+    /// residual-derivative tests do not apply to state-dependent IRLS weights.
     fn linearize<L: LinearizationSink<Scalar = Self::Scalar>>(
         &self,
         states: &S,
@@ -59,7 +80,8 @@ pub trait FactorBatch<S> {
 
     /// Sum the selected factors' costs, sharing value-only preparation.
     ///
-    /// Use the same whitened least-squares objective as [`Factor::cost`].
+    /// Use the same nonlinear objective contract as [`Factor::cost`], including
+    /// robust objectives with frozen-weight local models.
     fn cost(
         &self,
         states: &S,
