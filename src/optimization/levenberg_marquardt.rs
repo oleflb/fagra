@@ -146,6 +146,37 @@ pub struct LevenbergMarquardt<B: DampedLeastSquaresBackend = Lsmr> {
     statistics: LmStatistics<B::Scalar>,
 }
 impl<B: DampedLeastSquaresBackend> LevenbergMarquardt<B> {
+    /// Solve and extract covariance from the final undamped model.
+    /// The returned matrix borrows the problem's retained query workspace.
+    #[allow(clippy::type_complexity)]
+    pub fn solve_batch_with_covariance<'a, S, F>(
+        &mut self,
+        problem: &'a mut impl crate::BatchProblem<S, F>,
+        options: &OptimizeOptions<S::Scalar>,
+        blocks: &[crate::BlockId],
+        covariance_options: &crate::CovarianceOptions<S::Scalar>,
+    ) -> Result<(OptimizeReport<S::Scalar>, faer::MatRef<'a, S::Scalar>), SolverError>
+    where
+        S: StateSchema<Scalar = B::Scalar>,
+        F: FactorSchema<S, Scalar = S::Scalar>,
+        B: crate::covariance::CovarianceBackend,
+    {
+        problem.run_batch_with_covariance(self, options, blocks, covariance_options)
+    }
+
+    /// Solve an ordinary or tracked problem, retaining this solver's workspace.
+    pub fn solve_batch<S, F>(
+        &mut self,
+        problem: &mut impl crate::BatchProblem<S, F>,
+        options: &OptimizeOptions<S::Scalar>,
+    ) -> Result<OptimizeReport<S::Scalar>, SolverError>
+    where
+        S: StateSchema<Scalar = B::Scalar>,
+        F: FactorSchema<S, Scalar = S::Scalar>,
+    {
+        problem.run_batch(self, options)
+    }
+
     /// Construct an optimizer retaining the supplied backend and default controls.
     pub fn new(backend: B) -> Self {
         Self {

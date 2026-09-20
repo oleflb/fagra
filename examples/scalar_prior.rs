@@ -5,8 +5,8 @@
 
 use faer_ext::nalgebra::{Const, DefaultAllocator, RealField, SMatrix, SVector};
 use fagra::{
-    BlockId, EvaluationError, Factor, Jacobian, JacobianBlock, LinearizationSink, Real, Solver,
-    SolverError, StateKey, StateStore, Tangent, Variable,
+    BlockId, EvaluationError, Factor, GaussNewton, Jacobian, JacobianBlock, LinearizationSink,
+    Problem, Real, SolverError, StateKey, StateStore, Tangent, Variable,
 };
 
 /// The additive real line, with one tangent coordinate in the stored value's units.
@@ -88,16 +88,16 @@ fagra::states! { pub States<R> { scalars: Scalar<R> } }
 fagra::factors! { pub Factors<R> { priors: Prior<R> } }
 
 fn run<R: Real>() -> Result<(), SolverError> {
-    let mut solver = Solver::<States<R>, Factors<R>>::new();
-    let x = solver.add(Scalar(R::zero()));
-    let prior = solver.add_factor(Prior {
+    let mut problem = Problem::<States<R>, Factors<R>>::new();
+    let x = problem.add(Scalar(R::zero()));
+    let prior = problem.add_factor(Prior {
         variable: x,
         measurement: R::from_f64_impl(3.0),
     })?;
 
-    let report = solver.optimize()?;
-    let estimate = solver.get(x)?;
-    let cost = solver.factor_cost(prior)?;
+    let report = GaussNewton::default().solve_batch(&mut problem, &Default::default())?;
+    let estimate = problem.get(x)?;
+    let cost = problem.factor_cost(prior)?;
     println!(
         "estimate = {}, cost = {cost}, steps = {}",
         estimate.0, report.iterations

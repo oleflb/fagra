@@ -10,23 +10,23 @@ use crate::{
 
 /// A graph over a declared state schema `S` and factor schema `F`.
 ///
-/// Both schemas share one scalar type, inferred from `S::Scalar`. The retained
-/// optimizer, factor costs, stopping controls, and reports use that same precision.
+/// Both schemas share one scalar type, inferred from `S::Scalar`.
+/// This owns states, factors, historical priors, and reusable query workspaces,
+/// but no nonlinear optimizer or incremental change tracking.
 ///
 /// Created from [`states!`](crate::states!) and [`factors!`](crate::factors!)
 /// declarations. Storage, checked graph insertion, factor costs, and removal work.
-/// Dense full-step Gauss–Newton is available through [`optimize`](Self::optimize).
+/// Nonlinear solvers operate on this graph through their `solve_batch` methods.
 /// Bulk square-root marginalization replaces incident factors with internal priors.
-pub struct Solver<S: StateSchema, F> {
+pub struct Problem<S: StateSchema, F> {
     states: S,
     factors: F,
-    optimizer: GaussNewton<DenseNormalCholesky<S::Scalar>>,
     priors: Priors<S::Scalar>,
     marginalizer: Marginalizer<S::Scalar>,
     covariance: crate::covariance::CovarianceWorkspace<S::Scalar>,
 }
 
-impl<S, F> Solver<S, F>
+impl<S, F> Problem<S, F>
 where
     S: StateSchema,
     F: FactorSchema<S, Scalar = S::Scalar>,
@@ -36,7 +36,6 @@ where
         Self {
             states: S::default(),
             factors: F::default(),
-            optimizer: GaussNewton::default(),
             priors: Priors::default(),
             marginalizer: Marginalizer::default(),
             covariance: crate::covariance::CovarianceWorkspace::default(),
@@ -150,24 +149,6 @@ where
         Ok(self.factors.remove_factor(factor)?)
     }
 
-    /// Optimize with full-step Gauss–Newton and dense normal-equation Cholesky.
-    ///
-    /// Uses [`OptimizeOptions::default`] and retains workspace across calls.
-    /// All stored variables contribute coordinates, so unconstrained variables
-    /// can make a required linear solve singular. Finite full steps are accepted
-    /// even if cost increases; there is no damping or line search.
-    ///
-    /// Failed trial evaluation discards all trial values, retaining estimates
-    /// accepted by earlier iterations. Iteration exhaustion returns `NoConvergence`.
-    pub fn optimize(&mut self) -> Result<OptimizeReport<S::Scalar>, SolverError> {
-        self.optimizer.optimize(
-            &mut self.states,
-            &mut self.factors,
-            &mut self.priors,
-            &OptimizeOptions::default(),
-        )
-    }
-
     /// Optimize with a reusable method and explicit stopping controls.
     ///
     /// The method owns its backend/workspace and can be reused after graph edits
@@ -186,7 +167,7 @@ where
     /// # Ok(())
     /// # }
     /// ```
-    pub fn optimize_with<O: Optimizer<S, F>>(
+    pub(crate) fn optimize_with<O: Optimizer<S, F>>(
         &mut self,
         method: &mut O,
         options: &OptimizeOptions<S::Scalar>,
@@ -256,7 +237,7 @@ where
     /// for fixed states throughout this call, as required during optimization.
     // Keep the report and borrowed matrix explicit rather than adding a wrapper type.
     #[allow(clippy::type_complexity)]
-    pub fn optimize_with_covariance<O: crate::covariance::CovarianceOptimizer<S, F>>(
+    pub(crate) fn optimize_with_covariance<O: crate::covariance::CovarianceOptimizer<S, F>>(
         &mut self,
         method: &mut O,
         options: &OptimizeOptions<S::Scalar>,
@@ -323,7 +304,7 @@ where
     /// QR acts directly on Jacobian rows; no normal equations or damping are used.
     /// Rank deficiency is supported, but no nonlinear observability/FEJ policy is
     /// imposed. Use LSMR for optimization if normal equations must also be avoided
-    /// in the nonlinear solve; [`Self::optimize`] still defaults to Cholesky.
+    /// in the nonlinear solve.
     pub fn marginalize_with(
         &mut self,
         variables: &[BlockId],
@@ -339,13 +320,77 @@ where
     }
 }
 
-impl<S, F> Default for Solver<S, F>
+impl<S, F> Default for Problem<S, F>
 where
     S: StateSchema,
     F: FactorSchema<S, Scalar = S::Scalar>,
 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Compatibility graph owner with a retained default Gauss–Newton optimizer.
+/// New code can use [`Problem`] and solver-side `solve_batch` instead.
+pub struct Solver<S: StateSchema, F> {
+    problem: Problem<S, F>,
+    optimizer: GaussNewton<DenseNormalCholesky<S::Scalar>>,
+}
+
+impl<S: StateSchema, F: FactorSchema<S, Scalar = S::Scalar>> Solver<S, F> {
+    /// Optimize with a reusable method. Prefer the method's `solve_batch` on a `Problem`.
+    pub fn optimize_with<O: Optimizer<S, F>>(
+        &mut self,
+        method: &mut O,
+        options: &OptimizeOptions<S::Scalar>,
+    ) -> Result<OptimizeReport<S::Scalar>, SolverError> {
+        self.problem.optimize_with(method, options)
+    }
+
+    /// Optimize and borrow selected covariance from the final undamped model.
+    #[allow(clippy::type_complexity)]
+    pub fn optimize_with_covariance<O: crate::covariance::CovarianceOptimizer<S, F>>(
+        &mut self,
+        method: &mut O,
+        options: &OptimizeOptions<S::Scalar>,
+        blocks: &[BlockId],
+        covariance_options: &crate::CovarianceOptions<S::Scalar>,
+    ) -> Result<(OptimizeReport<S::Scalar>, faer::MatRef<'_, S::Scalar>), SolverError> {
+        self.problem
+            .optimize_with_covariance(method, options, blocks, covariance_options)
+    }
+
+    /// Construct an empty graph and its default optimizer.
+    pub fn new() -> Self {
+        Self {
+            problem: Problem::new(),
+            optimizer: GaussNewton::default(),
+        }
+    }
+
+    /// Optimize with the retained default Gauss–Newton optimizer.
+    pub fn optimize(&mut self) -> Result<OptimizeReport<S::Scalar>, SolverError> {
+        self.optimizer
+            .solve_batch(&mut self.problem, &OptimizeOptions::default())
+    }
+}
+
+impl<S: StateSchema, F: FactorSchema<S, Scalar = S::Scalar>> Default for Solver<S, F> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S: StateSchema, F> std::ops::Deref for Solver<S, F> {
+    type Target = Problem<S, F>;
+    fn deref(&self) -> &Self::Target {
+        &self.problem
+    }
+}
+
+impl<S: StateSchema, F> std::ops::DerefMut for Solver<S, F> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.problem
     }
 }
 

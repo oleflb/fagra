@@ -35,7 +35,7 @@ pub(crate) struct RawKey {
     pub(crate) local: LocalKey,
 }
 
-/// A typed state handle issued by [`Solver::add`](crate::Solver::add).
+/// A typed state handle issued by [`Problem::add`](crate::Problem::add).
 ///
 /// Identity is solver-local and survives pool growth and dense-storage moves.
 /// Keys are process-local identities, not persistent addresses or matrix offsets.
@@ -67,6 +67,13 @@ impl<T> StateKey<T> {
 pub struct FactorKey<T> {
     pub(crate) raw: RawKey,
     _private: PhantomData<fn() -> T>,
+}
+
+impl<T> FactorKey<T> {
+    /// Stable identity used by change tracking and numerical factor caches.
+    pub fn factor_id(self) -> FactorId {
+        FactorId(self.raw)
+    }
 }
 
 /// A typed handle to one shared evaluator and its factor storage.

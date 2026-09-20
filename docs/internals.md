@@ -259,6 +259,22 @@ condition number.
 
 ## Solver passes
 
+### Problem ownership
+
+`Problem<S, F>` owns graph storage, marginal priors, and retained covariance and
+marginalization workspaces. It does not own a nonlinear optimizer. GN and LM expose
+`solve_batch` and `solve_batch_with_covariance`; their existing backend and workspace
+ownership is unchanged. `Solver<S, F>` is a compatibility wrapper combining a
+`Problem` with the old default GN optimizer.
+
+`TrackedProblem` adds an opt-in journal around an owned problem. Checked mutations
+record successful edits; read-only dereferencing exposes estimate and factor-cost
+queries. No mutable dereferencing is provided. Sealed batch dispatch invalidates
+tracking before invoking the optimizer, so errors after accepted iterations cannot
+leave a valid-looking stale cache. Ordinary batch dispatch has no tracking work.
+Incremental factorization, journal consumption, and cache revision protocols are
+not implemented in this ownership refactor.
+
 ### Bipartite Schur backend
 
 `src/schur.rs` uses the shared linear model and normalized block-factor workspace.

@@ -13,6 +13,47 @@ their incident factors with internal manifold priors.
 Checked estimate replacement, selected joint covariance, and user-defined robust
 IRLS local models are supported.
 
+## Problem ownership and batch solvers
+
+`Problem<S, F>` owns states, factors, batches, and historical marginal priors.
+Nonlinear solvers own their linear backend and reusable optimization workspace:
+
+```rust,ignore
+let mut problem = fagra::Problem::<States, Factors>::new();
+let x = problem.add(initial);
+problem.add_factor(measurement)?;
+
+let mut solver = fagra::LevenbergMarquardt::new(fagra::Lsmr::default());
+let report = solver.solve_batch(&mut problem, &Default::default())?;
+let estimate = problem.get(x)?;
+```
+
+`GaussNewton` supports the same `solve_batch` entry point. Both methods also
+provide `solve_batch_with_covariance(problem, options, blocks, covariance_options)`
+to reuse the final model. Covariance and marginalization query workspaces remain
+on the problem, retaining their buffers across calls. The existing `Solver` graph
+API remains available as a compatibility wrapper with a default GN optimizer.
+See [examples/scalar_prior.rs](examples/scalar_prior.rs) for a runnable example.
+
+### Opt-in change tracking
+
+`TrackedProblem::new(problem)` owns a problem and records successful state/factor
+edits. Ordinary `Problem` instances have no tracking fields or mutation hooks.
+Read access is shared with `Problem`; mutable graph access goes through the wrapper.
+
+```rust,ignore
+let mut tracked = fagra::TrackedProblem::new(problem);
+tracked.set(x, replacement)?;
+solver.solve_batch(&mut tracked, &Default::default())?;
+let problem = tracked.into_inner();
+```
+
+Batch solving invalidates the tracked numerical model before evaluation, including
+on errors or unwinding. Successful nonempty marginalization also requests a rebuild.
+`changes()` exposes the pending journal read-only; `invalidate_all()` marks external
+changes to shared evaluator data. There is no journal-consuming incremental solver
+or Bayes tree yet, so edits remain pending until superseded by a rebuild marker.
+
 ## Quick start: one scalar and one prior
 
 This model minimizes `0.5 * (x - measurement)²`. Its solution is `x = measurement`.

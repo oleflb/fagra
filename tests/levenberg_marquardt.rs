@@ -710,6 +710,31 @@ fn scoped_covariance_reuses_hot_workspace_for_all_backends() {
 }
 
 #[test]
+fn problem_batch_api_reuses_workspace_without_tracking_allocations() {
+    let mut problem = fagra::Problem::<scalar::States<f64>, scalar::Factors<f64>>::new();
+    let x = problem.add(Scalar(0.));
+    problem
+        .add_factor(scalar::Prior {
+            variable: x,
+            measurement: 3.,
+        })
+        .unwrap();
+    let mut method = LevenbergMarquardt::default();
+    for sample in 0..3 {
+        let (_, allocations, _) = measured(|| {
+            problem.set(x, Scalar(0.)).unwrap();
+            method
+                .solve_batch(&mut problem, &Default::default())
+                .unwrap();
+            assert!((problem.get(x).unwrap().0 - 3.).abs() < 1e-7);
+        });
+        if sample > 0 {
+            assert_eq!(allocations, 0);
+        }
+    }
+}
+
+#[test]
 #[ignore = "release GN/LM comparison; run with --ignored --nocapture --test-threads=1"]
 fn benchmark() {
     println!(
