@@ -8,7 +8,7 @@ pub enum KeyError {
     #[error("handle belongs to a different solver")]
     ForeignSolver,
     /// The entry was removed or its slot was reused.
-    #[error("handle refers to a removed or replaced entry")]
+    #[error("handle refers to a removed or reused entry")]
     Stale,
     /// No entry matches the handle.
     #[error("unknown handle")]
@@ -40,6 +40,15 @@ pub enum EvaluationError {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum SolverError {
+    /// A covariance selection contains the same variable more than once.
+    #[error("duplicate variable in covariance selection")]
+    DuplicateCovarianceBlock,
+    /// Undamped information is not positive definite or fails the pivot tolerance.
+    #[error("undamped information is singular or numerically rank deficient")]
+    SingularInformation,
+    /// Information assembly, factorization, or covariance produced nonfinite values.
+    #[error("invalid or nonfinite covariance information")]
+    InvalidInformation,
     /// A numerical rank tolerance was negative, nonfinite, or at least one.
     #[error("relative rank tolerance must be finite and in [0, 1)")]
     InvalidRankTolerance,

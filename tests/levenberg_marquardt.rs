@@ -221,8 +221,13 @@ fn retries_cache_jacobians_and_handle_invalid_trials_in_both_precisions() {
                 max_iterations: 100,
                 ..Default::default()
             };
-            let report = graph
-                .optimize_with(&mut method, &options)
+            let (report, covariance) = graph
+                .optimize_with_covariance(
+                    &mut method,
+                    &options,
+                    &[x.block_id()],
+                    &Default::default(),
+                )
                 .unwrap_or_else(|e| {
                     panic!(
                         "{} {kind:?}: {e}, {:?}",
@@ -230,6 +235,11 @@ fn retries_cache_jacobians_and_handle_invalid_trials_in_both_precisions() {
                         method.statistics()
                     )
                 });
+            let expected_variance = match kind {
+                Kind::Square => c(0.25),
+                _ => c(1.0),
+            };
+            assert!((covariance[(0, 0)] - expected_variance).abs() < c(1e-4));
             let stats = method.statistics();
             assert!((graph.get(x).unwrap().0 - c(target)).abs() < c(2e-5));
             assert!(report.final_cost < report.initial_cost);
@@ -639,6 +649,64 @@ fn schur_reuses_warm_workspace_and_converges_on_fresh_graphs() {
             assert_eq!(allocations, 0);
         }
     }
+}
+
+#[test]
+fn scoped_covariance_reuses_hot_workspace_for_all_backends() {
+    fn check<O: fagra::__private::CovarianceOptimizer<States<f64>, Factors<f64>>>(mut method: O) {
+        let mut graph = Solver::<States<f64>, Factors<f64>>::new();
+        let a = graph.add(Scalar(0.5));
+        let b = graph.add(Scalar(1.));
+        let reset = Rc::new(Cell::new(false));
+        for (key, target) in [(a, 1.), (b, 2.)] {
+            graph
+                .add_factor(Curve {
+                    key,
+                    target,
+                    offset: 0.,
+                    kind: Kind::Square,
+                    reset: reset.clone(),
+                    calls: Rc::new(Calls::default()),
+                    malformed: false,
+                })
+                .unwrap();
+        }
+        graph
+            .add_factor(Link {
+                a,
+                b,
+                difference: 1.,
+                reset,
+            })
+            .unwrap();
+        let blocks = [b.block_id(), a.block_id()];
+        for sample in 0..6 {
+            let (_, allocations, _) = measured(|| {
+                graph.set(a, Scalar(0.5)).unwrap();
+                graph.set(b, Scalar(1.)).unwrap();
+                let (_, cov) = graph
+                    .optimize_with_covariance(
+                        &mut method,
+                        &Default::default(),
+                        &blocks[..if sample % 2 == 0 { 2 } else { 1 }],
+                        &Default::default(),
+                    )
+                    .unwrap();
+                assert!((cov[(0, 0)] - 4.01 / 64.2).abs() < 1e-8);
+                if cov.ncols() == 2 {
+                    assert!((cov[(0, 1)] - 0.01 / 64.2).abs() < 1e-8);
+                    assert!((cov[(1, 1)] - 16.01 / 64.2).abs() < 1e-8);
+                }
+            });
+            if sample > 0 {
+                assert_eq!(allocations, 0, "sample {sample}");
+            }
+        }
+    }
+    check(GaussNewton::default());
+    check(GaussNewton::new(Lsmr::default()));
+    check(LevenbergMarquardt::default());
+    check(LevenbergMarquardt::new(fagra::Schur::new(1, 1, 1)));
 }
 
 #[test]

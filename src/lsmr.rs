@@ -528,6 +528,16 @@ impl<R: Real> LeastSquaresBackend for Lsmr<R> {
     }
 }
 
+impl<R: Real> crate::covariance::CovarianceBackend for Lsmr<R> {
+    fn covariance(
+        &mut self,
+        normal: &mut crate::DenseNormalCholesky<R>,
+        selected: &mut crate::covariance::SelectedCovariance<R>,
+    ) -> Result<(), SolverError> {
+        self.model.covariance(normal, selected)
+    }
+}
+
 impl<R: Real> DampedLeastSquaresBackend for Lsmr<R> {
     fn prepare_damping(&mut self, min_column_norm: R) -> Result<(), SolverError> {
         let start = self.collect_timings.then(Instant::now);

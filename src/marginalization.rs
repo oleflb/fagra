@@ -291,7 +291,7 @@ impl<R: Real> LeastSquaresBackend for Rows<R> {
 
 // faer 0.24 may shrink the other capacity when growing one dimension. Reserve
 // both high-water dimensions before resizing so alternating shapes do not churn.
-struct MatrixBuffer<R> {
+pub(crate) struct MatrixBuffer<R> {
     matrix: Mat<R>,
     capacity: (usize, usize),
 }
@@ -304,7 +304,7 @@ impl<R> Default for MatrixBuffer<R> {
     }
 }
 impl<R: Real> MatrixBuffer<R> {
-    fn resize(&mut self, rows: usize, cols: usize) {
+    pub(crate) fn resize(&mut self, rows: usize, cols: usize) {
         self.capacity.0 = self.capacity.0.max(rows);
         self.capacity.1 = self.capacity.1.max(cols);
         self.matrix.reserve(self.capacity.0, self.capacity.1);

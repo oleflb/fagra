@@ -160,18 +160,20 @@ pub trait DampedLeastSquaresBackend: LeastSquaresBackend {
     ) -> Result<DampedStep<'_, Self::Scalar>, SolverError>;
 }
 
-struct Workspace<B> {
-    backend: B,
-    layout: Layout,
+pub(crate) struct Workspace<B> {
+    pub(crate) backend: B,
+    pub(crate) layout: Layout,
+    current: bool,
     seen: Vec<bool>,
     block_marks: Vec<usize>,
     columns: Vec<usize>,
 }
 
 impl<B> Workspace<B> {
-    fn new(backend: B) -> Self {
+    pub(crate) fn new(backend: B) -> Self {
         Self {
             backend,
+            current: false,
             layout: Layout::default(),
             seen: Vec::new(),
             block_marks: Vec::new(),
@@ -181,11 +183,15 @@ impl<B> Workspace<B> {
 }
 
 impl<B: LeastSquaresBackend> Workspace<B> {
-    fn prepare<S: StateSchema<Scalar = B::Scalar>, F: FactorSchema<S, Scalar = B::Scalar>>(
+    pub(crate) fn prepare<
+        S: StateSchema<Scalar = B::Scalar>,
+        F: FactorSchema<S, Scalar = B::Scalar>,
+    >(
         &mut self,
         states: &mut S,
         factors: &mut F,
     ) -> Result<(), SolverError> {
+        self.current = false;
         self.layout.clear();
         states.visit(&mut self.layout)?;
         factors.visit(&mut self.layout)?;
@@ -204,12 +210,16 @@ impl<B: LeastSquaresBackend> Workspace<B> {
         Ok(())
     }
 
-    fn linearize<S: StateSchema<Scalar = B::Scalar>, F: FactorSchema<S, Scalar = B::Scalar>>(
+    pub(crate) fn linearize<
+        S: StateSchema<Scalar = B::Scalar>,
+        F: FactorSchema<S, Scalar = B::Scalar>,
+    >(
         &mut self,
         states: &mut S,
         factors: &mut F,
         priors: &mut Priors<B::Scalar>,
     ) -> Result<(), SolverError> {
+        self.current = false;
         self.backend.clear();
         self.seen.fill(false);
         self.block_marks.fill(0);
@@ -233,7 +243,27 @@ impl<B: LeastSquaresBackend> Workspace<B> {
         if sink.failed || sink.seen.iter().any(|seen| !seen) {
             return Err(EvaluationError::InvalidEmission.into());
         }
-        priors.linearize(states, &mut self.backend, &self.layout, None)
+        priors.linearize(states, &mut self.backend, &self.layout, None)?;
+        self.current = true;
+        Ok(())
+    }
+}
+
+impl<B: crate::covariance::CovarianceBackend> Workspace<B> {
+    fn covariance<S: StateSchema<Scalar = B::Scalar>, F: FactorSchema<S, Scalar = S::Scalar>>(
+        &mut self,
+        states: &mut S,
+        factors: &mut F,
+        priors: &mut Priors<S::Scalar>,
+        blocks: &[BlockId],
+        covariance: &mut crate::covariance::CovarianceWorkspace<S::Scalar>,
+    ) -> Result<(), SolverError> {
+        if !self.current {
+            self.linearize(states, factors, priors)?;
+        }
+        covariance.selected.prepare(&self.layout, blocks)?;
+        self.backend
+            .covariance(&mut covariance.work.backend, &mut covariance.selected)
     }
 }
 

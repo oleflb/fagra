@@ -271,6 +271,7 @@ where
                                     if actual > c(0.0) && ratio >= self.options.acceptance_threshold
                                     {
                                         trial.states.visit(&mut Accept).unwrap();
+                                        self.work.current = false;
                                         self.statistics.accepted_steps += 1;
                                         self.statistics.cost = Some(value + constant);
                                         stalled = options.step_tolerance > c(0.0)
@@ -310,5 +311,27 @@ where
                 return Err(SolverError::NoProgress);
             }
         }
+    }
+}
+
+impl<S, F, B> crate::covariance::CovarianceOptimizer<S, F> for LevenbergMarquardt<B>
+where
+    S: StateSchema,
+    F: FactorSchema<S, Scalar = S::Scalar>,
+    B: DampedLeastSquaresBackend<Scalar = S::Scalar> + crate::covariance::CovarianceBackend,
+{
+    fn optimize_covariance(
+        &mut self,
+        states: &mut S,
+        factors: &mut F,
+        priors: &mut Priors<S::Scalar>,
+        options: &OptimizeOptions<S::Scalar>,
+        blocks: &[crate::BlockId],
+        covariance: &mut crate::covariance::CovarianceWorkspace<S::Scalar>,
+    ) -> Result<OptimizeReport<S::Scalar>, SolverError> {
+        let report = self.optimize(states, factors, priors, options)?;
+        self.work
+            .covariance(states, factors, priors, blocks, covariance)?;
+        Ok(report)
     }
 }

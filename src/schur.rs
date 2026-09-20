@@ -482,6 +482,16 @@ impl<R: Real> LeastSquaresBackend for Schur<R> {
     }
 }
 
+impl<R: Real> crate::covariance::CovarianceBackend for Schur<R> {
+    fn covariance(
+        &mut self,
+        normal: &mut crate::DenseNormalCholesky<R>,
+        selected: &mut crate::covariance::SelectedCovariance<R>,
+    ) -> Result<(), SolverError> {
+        self.model.covariance(normal, selected)
+    }
+}
+
 impl<R: Real> DampedLeastSquaresBackend for Schur<R> {
     fn prepare_damping(&mut self, min_column_norm: R) -> Result<(), SolverError> {
         self.ready = false;

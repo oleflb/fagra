@@ -75,6 +75,12 @@ impl<T: Variable> StatePool<T> {
         Ok(&self.current_values()[index])
     }
 
+    pub(crate) fn set(&mut self, key: StateKey<T>, value: T) -> Result<(), KeyError> {
+        assert!(!self.trial_active);
+        *self.entries.get_mut(key.raw)? = value;
+        Ok(())
+    }
+
     /// Reserve room for additional states and their identity metadata.
     ///
     /// Panics on capacity/index exhaustion. Existing handles survive reallocation.

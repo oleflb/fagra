@@ -23,6 +23,7 @@ pub struct Solver<S: StateSchema, F> {
     optimizer: GaussNewton<DenseNormalCholesky<S::Scalar>>,
     priors: Priors<S::Scalar>,
     marginalizer: Marginalizer<S::Scalar>,
+    covariance: crate::covariance::CovarianceWorkspace<S::Scalar>,
 }
 
 impl<S, F> Solver<S, F>
@@ -38,6 +39,7 @@ where
             optimizer: GaussNewton::default(),
             priors: Priors::default(),
             marginalizer: Marginalizer::default(),
+            covariance: crate::covariance::CovarianceWorkspace::default(),
         }
     }
 
@@ -55,6 +57,22 @@ where
         S: StateStore<T>,
     {
         self.states.get(key)
+    }
+
+    /// Replace an accepted estimate after checking its key, preserving its identity.
+    ///
+    /// Attached factors and historical marginal-prior anchors remain intact. Invalid
+    /// keys leave storage unchanged. As with insertion, the caller supplies a value
+    /// in the variable's valid domain; this checks identity, not arbitrary geometry.
+    pub fn set<T: Variable<Scalar = S::Scalar>>(
+        &mut self,
+        key: StateKey<T>,
+        value: T,
+    ) -> Result<(), KeyError>
+    where
+        S: PoolAccess<StatePool<T>>,
+    {
+        self.states.pool_mut().set(key, value)
     }
 
     /// Insert an ordinary factor after validating its variable dependencies.
@@ -181,6 +199,98 @@ where
         )
     }
 
+    /// Selected joint inverse-information covariance at the current estimates.
+    ///
+    /// Includes ordinary factors, batches, and internal marginal priors, without
+    /// optimizer damping. Rows/columns concatenate each requested block's right
+    /// tangent coordinates in request order, including all cross-correlations.
+    /// Robust factors contribute their emitted IRLS information, not a sandwich
+    /// estimator. Historical information is that retained by marginal priors.
+    ///
+    /// Evaluates a fresh model without changing estimates. All live coordinates
+    /// must be observable, even those not selected; no pseudoinverse is used.
+    /// Duplicate, stale, unknown, and foreign identities are rejected. An empty
+    /// selection still validates the full information matrix.
+    ///
+    /// Uses dense O(n²) storage and O(n³) factorization, then O(n² k + n k²) work
+    /// for k selected coordinates, never a full inverse. Buffers are retained;
+    /// warmed calls within retained capacities allocate no library heap memory.
+    /// The result borrows solver storage; use `.to_owned()` to retain a copy.
+    pub fn joint_covariance(
+        &mut self,
+        blocks: &[BlockId],
+    ) -> Result<faer::MatRef<'_, S::Scalar>, SolverError> {
+        self.joint_covariance_with(blocks, &crate::CovarianceOptions::default())
+    }
+
+    /// Selected covariance with explicit numerical rank controls.
+    pub fn joint_covariance_with(
+        &mut self,
+        blocks: &[BlockId],
+        options: &crate::CovarianceOptions<S::Scalar>,
+    ) -> Result<faer::MatRef<'_, S::Scalar>, SolverError> {
+        options.validate()?;
+        self.validate_covariance_blocks(blocks)?;
+        self.covariance.selected.options = *options;
+        self.covariance.evaluate(
+            &mut self.states,
+            &mut self.factors,
+            &mut self.priors,
+            blocks,
+        )?;
+        Ok(self.covariance.selected.matrix())
+    }
+
+    /// Optimize and extract selected covariance from the final undamped model.
+    ///
+    /// Reuses final Jacobians (and dense Cholesky when available) within this call.
+    /// GN cost termination refreshes the model after its last accepted step. LM
+    /// convergence already has a current model, so extraction does not reevaluate
+    /// factors. LSMR/Schur assemble dense information from cached original-coordinate
+    /// Jacobians once; this does not reuse a damped solve or preconditioner.
+    ///
+    /// The covariance uses the dense storage/cost and borrowed-result contract of
+    /// [`Self::joint_covariance`]. Selection and options are checked before optimization.
+    /// If extraction fails, accepted optimized estimates remain visible. No numerical
+    /// cache is reused across calls or graph edits. Evaluators must remain deterministic
+    /// for fixed states throughout this call, as required during optimization.
+    // Keep the report and borrowed matrix explicit rather than adding a wrapper type.
+    #[allow(clippy::type_complexity)]
+    pub fn optimize_with_covariance<O: crate::covariance::CovarianceOptimizer<S, F>>(
+        &mut self,
+        method: &mut O,
+        options: &OptimizeOptions<S::Scalar>,
+        blocks: &[BlockId],
+        covariance_options: &crate::CovarianceOptions<S::Scalar>,
+    ) -> Result<(OptimizeReport<S::Scalar>, faer::MatRef<'_, S::Scalar>), SolverError> {
+        covariance_options.validate()?;
+        self.validate_covariance_blocks(blocks)?;
+        self.covariance.selected.options = *covariance_options;
+        let report = method.optimize_covariance(
+            &mut self.states,
+            &mut self.factors,
+            &mut self.priors,
+            options,
+            blocks,
+            &mut self.covariance,
+        )?;
+        Ok((report, self.covariance.selected.matrix()))
+    }
+
+    fn validate_covariance_blocks(&mut self, blocks: &[BlockId]) -> Result<(), SolverError> {
+        let mut dependencies = Dependencies {
+            states: &mut self.states,
+            result: Ok(()),
+        };
+        for (i, &block) in blocks.iter().enumerate() {
+            if blocks[..i].contains(&block) {
+                return Err(SolverError::DuplicateCovarianceBlock);
+            }
+            dependencies.check(block);
+        }
+        Ok(dependencies.result?)
+    }
+
     /// Jointly eliminate the supplied states using square-root QR.
     ///
     /// The caller selects identities with [`StateKey::block_id`]; no age or budget
@@ -188,6 +298,10 @@ where
     /// Linearizes at the current estimates without optimizing first. Only incident
     /// factors (including individual batch payloads and old priors) are absorbed.
     /// Their replacement is exact for the linearized objective, up to rank tolerance.
+    /// Robust factors contribute their emitted frozen-weight least-squares model.
+    /// Its additive difference from the true robust cost is not inferred or retained;
+    /// reported costs thereafter use the surrogate objective. Constants produced by
+    /// QR elimination of the emitted rows are retained.
     ///
     /// Internal priors use fixed Lie-group references and need no schema registration.
     /// Removed state/factor handles become stale; surviving handles remain valid.

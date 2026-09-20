@@ -119,6 +119,50 @@ impl<R: Real> Default for LinearizedModel<R> {
     }
 }
 impl<R: Real> LinearizedModel<R> {
+    pub(crate) fn covariance(
+        &self,
+        normal: &mut crate::DenseNormalCholesky<R>,
+        selected: &mut crate::covariance::SelectedCovariance<R>,
+    ) -> Result<(), SolverError> {
+        use crate::optimization::LeastSquaresBackend;
+        use faer_ext::IntoNalgebra;
+        normal.prepare(self.jacobian.cols)?;
+        normal.clear();
+        // Cached blocks are contiguous by residual emission. Replay borrowed views
+        // once per row group, retaining every cross term without copying Jacobians.
+        let mut start = 0;
+        while start < self.jacobian.blocks.len() {
+            let first = &self.jacobian.blocks[start];
+            if first.rows == 0 {
+                start += 1;
+                continue;
+            }
+            let mut end = start + 1;
+            while end < self.jacobian.blocks.len()
+                && self.jacobian.blocks[end].row == first.row
+                && self.jacobian.blocks[end].rows == first.rows
+            {
+                end += 1;
+            }
+            normal.accumulate(
+                &self.negative_residual[first.row..first.row + first.rows],
+                self.jacobian.blocks[start..end].iter().map(|b| {
+                    (
+                        b.col,
+                        faer::MatRef::from_column_major_slice(
+                            &self.jacobian.values[b.start..b.start + b.rows * b.cols],
+                            b.rows,
+                            b.cols,
+                        )
+                        .into_nalgebra(),
+                    )
+                }),
+            )?;
+            start = end;
+        }
+        selected.compute(normal)
+    }
+
     pub fn prepare(&mut self, dimension: usize) {
         self.jacobian.cols = dimension;
         self.gradient.resize(dimension, R::zero());

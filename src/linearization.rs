@@ -145,7 +145,10 @@ pub trait LinearizationSink: Sized {
         emit: impl FnOnce(&mut Self) -> Result<(), EvaluationError>,
     ) -> Result<(), EvaluationError>;
 
-    /// Emit a whitened residual and any number of borrowed Jacobian blocks.
+    /// Emit a local least-squares residual and borrowed Jacobian blocks.
+    ///
+    /// Ordinary factors emit whitened residuals; robust factors may additionally
+    /// apply frozen IRLS weights as documented in [`Factor::linearize`](crate::Factor::linearize).
     ///
     /// An active factor scope is required. Reject invalid identities, dimensions,
     /// or nonfinite values. Repeated variable IDs must be combined correctly or

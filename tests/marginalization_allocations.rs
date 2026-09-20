@@ -161,6 +161,49 @@ fn warmed_window_marginalization_does_not_allocate() {
 }
 
 #[test]
+fn warmed_covariance_with_batches_and_history_does_not_allocate() {
+    let mut graph = Solver::<States<f64>, Factors>::new();
+    let mut keys = Vec::new();
+    let batch = graph.add_batch(Batched);
+    for i in 0..128 {
+        let x = graph.add(Scalar(i as f64));
+        graph
+            .add_factor(Prior {
+                variable: x,
+                measurement: i as f64,
+            })
+            .unwrap();
+        if let Some(&y) = keys.last() {
+            graph
+                .add_factor_to(
+                    batch,
+                    DifferencePayload(Difference {
+                        x: y,
+                        y: x,
+                        measurement: 1.,
+                    }),
+                )
+                .unwrap();
+        }
+        keys.push(x);
+    }
+    graph
+        .marginalize(&[keys[0].block_id(), keys[1].block_id()])
+        .unwrap();
+    let blocks: Vec<_> = keys[3..24].iter().rev().map(|k| k.block_id()).collect();
+    graph.joint_covariance(&blocks).unwrap();
+    for width in [21, 3, 9, 21] {
+        let (_, allocations, _) = measured(|| {
+            graph.set(keys[3], Scalar(99.)).unwrap();
+            let cov = graph.joint_covariance(&blocks[..width]).unwrap();
+            assert_eq!(cov.ncols(), width);
+            assert!(cov[(0, 0)] > 0.);
+        });
+        assert_eq!(allocations, 0);
+    }
+}
+
+#[test]
 fn changing_prior_shapes_and_empty_separators_reuse_capacity() {
     let mut graph = Solver::<States<f64>, Factors>::new();
     for cycle in 0..48 {
@@ -199,6 +242,51 @@ fn changing_prior_shapes_and_empty_separators_reuse_capacity() {
         assert_eq!(report.separator_dof, 0);
         if cycle >= 12 {
             assert_eq!(allocations, 0, "empty separator cycle {cycle}");
+        }
+    }
+}
+
+#[test]
+fn alternating_covariance_dimensions_retain_both_capacities() {
+    let mut graph = Solver::<States<f64>, Factors>::new();
+    let mut keys = Vec::new();
+    for _ in 0..32 {
+        let key = graph.add(Scalar(0.));
+        graph
+            .add_factor(Prior {
+                variable: key,
+                measurement: 0.,
+            })
+            .unwrap();
+        keys.push(key.block_id());
+    }
+    for sample in 0..8 {
+        let width = if sample % 2 == 0 {
+            for _ in 32..128 {
+                let key = graph.add(Scalar(0.));
+                graph
+                    .add_factor(Prior {
+                        variable: key,
+                        measurement: 0.,
+                    })
+                    .unwrap();
+                keys.push(key.block_id());
+            }
+            3
+        } else {
+            graph.marginalize(&keys[32..]).unwrap();
+            keys.truncate(32);
+            21
+        };
+        // Alternate (n,k)=(128,3) and (32,21). Growing either dimension must
+        // preserve the other dimension's high-water mark, even after shrinking.
+        let (_, count, _) = measured(|| {
+            let cov = graph.joint_covariance(&keys[..width]).unwrap();
+            assert_eq!(cov.shape(), (width, width));
+            assert_eq!(cov[(0, 0)], 1.);
+        });
+        if sample >= 2 {
+            assert_eq!(count, 0, "sample {sample}");
         }
     }
 }

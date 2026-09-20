@@ -8,6 +8,9 @@
 //! Graph construction, generational handles, checked state access, factor and
 //! batch insertion, cost evaluation, removal, Gauss–Newton and Levenberg–Marquardt optimization,
 //! and bulk square-root [`marginalization`](Solver::marginalize) are implemented.
+//! Checked [`replacement`](Solver::set), selected [`joint covariance`](Solver::joint_covariance),
+//! and user-defined robust local models are supported. Covariance can reuse the
+//! final optimizer model through [`Solver::optimize_with_covariance`].
 //!
 //! # Quick start: one scalar and one prior
 //! [`Variable`] defines how a state changes. [`Factor`] declares its dependencies,
@@ -63,6 +66,7 @@
 #[cfg(test)]
 extern crate self as fagra;
 
+mod covariance;
 mod dense;
 mod error;
 mod factors;
@@ -83,6 +87,7 @@ mod variable;
 #[cfg(feature = "test-support")]
 pub mod testing;
 
+pub use covariance::CovarianceOptions;
 pub use error::{EvaluationError, KeyError, SolverError};
 pub use factors::{Factor, FactorBatch, FactorSelection};
 pub use key::{BatchKey, BlockId, FactorId, FactorKey, StateKey};
@@ -107,6 +112,9 @@ pub use variable::{Jacobian, Tangent, Variable};
 /// Changes to this plumbing can affect downstream macro expansions and manual impls.
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::covariance::{
+        CovarianceBackend, CovarianceOptimizer, CovarianceWorkspace, SelectedCovariance,
+    };
     pub use crate::factors::{FactorSchema, FactorStore, FactorVisitor};
     pub use crate::marginalization::Priors;
     pub use crate::optimization::{

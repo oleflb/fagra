@@ -21,9 +21,10 @@ use crate::{
 
 /// Dense normal equations solved by in-place faer Cholesky.
 ///
-/// Stores one dense n-by-n matrix and one RHS/step vector. Only the lower
-/// triangle is assembled and read. Factorization overwrites that triangle;
-/// solving overwrites the RHS with delta. Buffers and scratch are retained.
+/// Stores one dense n-by-n matrix, an RHS/step vector, and the original diagonal
+/// for covariance rank checks. Only the lower triangle is assembled and read.
+/// Factorization overwrites that triangle; solving overwrites the RHS with delta.
+/// Buffers and scratch are retained.
 ///
 /// Uses sequential dense kernels and no damping, pivot repair, or inverse.
 /// A step requires a positive-definite normal matrix (full column rank of J).
@@ -34,6 +35,8 @@ pub struct DenseNormalCholesky<R: Real = f64> {
     rhs: Vec<R>,
     scratch: Option<MemBuffer>,
     scratch_dimension: usize,
+    diagonal: Vec<R>,
+    factorized: bool,
 }
 
 impl<R: Real> Default for DenseNormalCholesky<R> {
@@ -43,6 +46,8 @@ impl<R: Real> Default for DenseNormalCholesky<R> {
             rhs: Vec::new(),
             scratch: None,
             scratch_dimension: 0,
+            diagonal: Vec::new(),
+            factorized: false,
         }
     }
 }
@@ -59,6 +64,8 @@ impl<R: Real> LeastSquaresBackend for DenseNormalCholesky<R> {
         self.normal
             .resize_with(dimension, dimension, |_, _| R::zero());
         self.rhs.resize(dimension, R::zero());
+        self.diagonal.resize(dimension, R::zero());
+        self.factorized = false;
         if dimension > self.scratch_dimension {
             self.scratch = Some(MemBuffer::new(llt::factor::cholesky_in_place_scratch::<R>(
                 dimension,
@@ -71,6 +78,7 @@ impl<R: Real> LeastSquaresBackend for DenseNormalCholesky<R> {
     }
 
     fn clear(&mut self) {
+        self.factorized = false;
         let n = self.rhs.len();
         for col in 0..n {
             self.normal
@@ -155,7 +163,30 @@ impl<R: Real> LeastSquaresBackend for DenseNormalCholesky<R> {
         if n == 0 {
             return Ok(&self.rhs);
         }
+        self.factorize()?;
+        let stack = MemStack::new(self.scratch.as_mut().expect("prepared Cholesky workspace"));
+        llt::solve::solve_in_place(
+            self.normal.as_ref(),
+            MatMut::from_column_major_slice_mut(&mut self.rhs, n, 1),
+            Par::Seq,
+            stack,
+        );
+        Ok(&self.rhs)
+    }
+}
+
+impl<R: Real> DenseNormalCholesky<R> {
+    pub(crate) fn factorize(&mut self) -> Result<(), SolverError> {
+        if self.factorized {
+            return Ok(());
+        }
+        let n = self.rhs.len();
+        if n == 0 {
+            self.factorized = true;
+            return Ok(());
+        }
         for col in 0..n {
+            self.diagonal[col] = self.normal[(col, col)];
             for row in col..n {
                 if !self.normal[(row, col)].is_finite() {
                     return Err(EvaluationError::InvalidEvaluation.into());
@@ -171,13 +202,30 @@ impl<R: Real> LeastSquaresBackend for DenseNormalCholesky<R> {
             Default::default(),
         )
         .map_err(|_| SolverError::LinearSolveFailed)?;
-        llt::solve::solve_in_place(
-            self.normal.as_ref(),
-            MatMut::from_column_major_slice_mut(&mut self.rhs, n, 1),
-            Par::Seq,
-            stack,
-        );
-        Ok(&self.rhs)
+        self.factorized = true;
+        Ok(())
+    }
+
+    pub(crate) fn information_factor(
+        &mut self,
+        tolerance: R,
+    ) -> Result<MatRef<'_, R>, SolverError> {
+        self.factorize().map_err(|error| match error {
+            SolverError::LinearSolveFailed => SolverError::SingularInformation,
+            _ => SolverError::InvalidInformation,
+        })?;
+        for (i, &diagonal) in self.diagonal.iter().enumerate() {
+            let pivot = self.normal[(i, i)];
+            if !pivot.is_finite() || !diagonal.is_finite() {
+                return Err(SolverError::InvalidInformation);
+            }
+            // Dimensionless squared pivot after implicit column normalization.
+            let ratio = pivot / diagonal.sqrt();
+            if diagonal <= R::zero() || pivot <= R::zero() || ratio * ratio <= tolerance {
+                return Err(SolverError::SingularInformation);
+            }
+        }
+        Ok(self.normal.as_ref())
     }
 }
 
@@ -185,6 +233,35 @@ impl<R: Real> LeastSquaresBackend for DenseNormalCholesky<R> {
 mod tests {
     use super::*;
     use faer_ext::nalgebra::{SMatrix, SVector};
+
+    #[test]
+    fn covariance_rejects_nonfinite_information_and_scaled_small_pivots() {
+        let mut backend = DenseNormalCholesky::<f64>::default();
+        for scale in [1e-6, 1., 1e6] {
+            backend.prepare(2).unwrap();
+            backend.clear();
+            let jacobian = SMatrix::<f64, 2, 2>::new(scale, 1., 0., 1e-5);
+            backend
+                .accumulate(&[0., 0.], std::iter::once((0, jacobian.as_view())))
+                .unwrap();
+            assert!(matches!(
+                backend.information_factor(1e-8),
+                Err(SolverError::SingularInformation)
+            ));
+            // Checking rank did not damage the reusable factorization.
+            backend.information_factor(1e-12).unwrap();
+        }
+        backend.prepare(1).unwrap();
+        backend.clear();
+        let huge = SMatrix::<f64, 1, 1>::new(1e200);
+        backend
+            .accumulate(&[0.], std::iter::once((0, huge.as_view())))
+            .unwrap();
+        assert!(matches!(
+            backend.information_factor(0.),
+            Err(SolverError::InvalidInformation)
+        ));
+    }
 
     #[test]
     fn lower_triangle_and_rhs_are_assembled_and_solved_in_place() {

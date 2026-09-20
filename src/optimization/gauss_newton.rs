@@ -106,6 +106,7 @@ where
                 trial_cost = cost(trial.states, factors, priors)?;
                 checked_cost(Ok(trial_cost + constant))?;
                 trial.states.visit(&mut Accept).unwrap();
+                self.work.current = false;
                 // Trial's drop now clears old accepted values after all buffers swap.
             }
             iterations += 1;
@@ -122,5 +123,27 @@ where
                 ));
             }
         }
+    }
+}
+
+impl<S, F, B> crate::covariance::CovarianceOptimizer<S, F> for GaussNewton<B>
+where
+    S: StateSchema,
+    F: FactorSchema<S, Scalar = S::Scalar>,
+    B: crate::covariance::CovarianceBackend<Scalar = S::Scalar>,
+{
+    fn optimize_covariance(
+        &mut self,
+        states: &mut S,
+        factors: &mut F,
+        priors: &mut Priors<S::Scalar>,
+        options: &OptimizeOptions<S::Scalar>,
+        blocks: &[crate::BlockId],
+        covariance: &mut crate::covariance::CovarianceWorkspace<S::Scalar>,
+    ) -> Result<OptimizeReport<S::Scalar>, SolverError> {
+        let report = self.optimize(states, factors, priors, options)?;
+        self.work
+            .covariance(states, factors, priors, blocks, covariance)?;
+        Ok(report)
     }
 }
