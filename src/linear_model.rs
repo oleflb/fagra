@@ -5,7 +5,7 @@ use faer::{
     dyn_stack::{MemStack, StackReq},
     matrix_free::{BiLinOp, LinOp},
 };
-use faer_ext::nalgebra::{DMatrixView, Dyn};
+use faer_ext::nalgebra::{DMatrixView, DVectorView, Dyn};
 
 pub(crate) mod block_factors;
 
@@ -145,7 +145,10 @@ impl<R: Real> LinearizedModel<R> {
                 end += 1;
             }
             normal.accumulate(
-                &self.negative_residual[first.row..first.row + first.rows],
+                DVectorView::from_slice(
+                    &self.negative_residual[first.row..first.row + first.rows],
+                    first.rows,
+                ),
                 self.jacobian.blocks[start..end].iter().map(|b| {
                     (
                         b.col,

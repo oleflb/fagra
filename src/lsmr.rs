@@ -4,7 +4,7 @@ use faer::{
     mat::AsMatMut,
     matrix_free::{BiLinOp, BiPrecond, IdentityPrecond, InitialGuessStatus, LinOp, lsmr},
 };
-use faer_ext::nalgebra::{DMatrixView, Dyn};
+use faer_ext::nalgebra::{DMatrixView, Dim, Dyn, VectorView};
 use std::{
     sync::Mutex,
     time::{Duration, Instant},
@@ -492,13 +492,13 @@ impl<R: Real> LeastSquaresBackend for Lsmr<R> {
         self.model.clear();
     }
 
-    fn accumulate<'a>(
+    fn accumulate<'a, Rows: Dim>(
         &mut self,
-        residual: &[R],
+        residual: VectorView<'_, R, Rows>,
         jacobians: impl Iterator<Item = (usize, DMatrixView<'a, R, Dyn, Dyn>)> + Clone,
     ) -> Result<(), EvaluationError> {
         self.prepared_mode = None;
-        self.model.accumulate(residual, jacobians)
+        self.model.accumulate(residual.as_slice(), jacobians)
     }
 
     fn gradient_norm(&self) -> Result<R, SolverError> {
@@ -625,7 +625,7 @@ mod tests {
             for row in [0, 2] {
                 backend
                     .accumulate(
-                        &[c(0.), c(0.)],
+                        SVector::from([c(0.), c(0.)]).column(0),
                         std::iter::once((0, j.fixed_rows::<2>(row).as_view())),
                     )
                     .unwrap();
@@ -733,7 +733,10 @@ mod tests {
         backend.prepare(2).unwrap();
         let j = SMatrix::<f64, 2, 2>::new(1., 0., 0., 3.);
         backend
-            .accumulate(&[-1., -1.], std::iter::once((0, j.as_view())))
+            .accumulate(
+                SVector::from([-1., -1.]).column(0),
+                std::iter::once((0, j.as_view())),
+            )
             .unwrap();
         backend.prepare_damping(0.1).unwrap();
         backend.block_preconditioning = false;
@@ -782,7 +785,7 @@ mod tests {
             backend.block_preconditioning = block;
             backend.prepare(4).unwrap();
             backend
-                .accumulate(r.as_slice(), std::iter::once((0, j.as_view())))
+                .accumulate(r.column(0), std::iter::once((0, j.as_view())))
                 .unwrap();
             backend.prepare_damping(c(1e-3)).unwrap();
             for lambda in [0.1, 10., 1e-3, 1e6] {
@@ -855,7 +858,7 @@ mod tests {
             backend.block_preconditioning = block;
             backend.prepare(3).unwrap();
             backend
-                .accumulate(residual.as_slice(), std::iter::once((0, j.as_view())))
+                .accumulate(residual.column(0), std::iter::once((0, j.as_view())))
                 .unwrap();
             backend.prepare_damping(c(1.0)).unwrap();
             let plain = backend.solve().unwrap().to_vec();
@@ -905,7 +908,7 @@ mod tests {
         backend.prepare(5).unwrap();
         backend
             .accumulate(
-                r.as_slice(),
+                r.column(0),
                 [
                     (3, j.fixed_columns::<2>(3).as_view()),
                     (0, j.fixed_columns::<2>(0).as_view()),
@@ -969,7 +972,7 @@ mod tests {
                 let residual = SVector::<f64, 2>::new(-(col as f64), -(col as f64 + 1.0));
                 solver
                     .accumulate(
-                        residual.as_slice(),
+                        residual.column(0),
                         std::iter::once((col, jacobian.as_view())),
                     )
                     .unwrap();
@@ -1005,13 +1008,13 @@ mod tests {
                 let r = SVector::<f64, 3>::new(1., -2., 3.);
                 solver
                     .accumulate(
-                        r.as_slice(),
+                        r.column(0),
                         blocks.iter().zip([2, 0]).map(|(b, c)| (c, b.jacobian())),
                     )
                     .unwrap();
                 dense
                     .accumulate(
-                        r.as_slice(),
+                        r.column(0),
                         blocks.iter().zip([2, 0]).map(|(b, c)| (c, b.jacobian())),
                     )
                     .unwrap();
@@ -1019,10 +1022,10 @@ mod tests {
                 let r = SVector::<f64, 2>::new(-4., 5.);
                 let blocks = [JacobianBlock::new(b, &jb)];
                 solver
-                    .accumulate(r.as_slice(), blocks.iter().map(|b| (0, b.jacobian())))
+                    .accumulate(r.column(0), blocks.iter().map(|b| (0, b.jacobian())))
                     .unwrap();
                 dense
-                    .accumulate(r.as_slice(), blocks.iter().map(|b| (0, b.jacobian())))
+                    .accumulate(r.column(0), blocks.iter().map(|b| (0, b.jacobian())))
                     .unwrap();
             }
             let j = faer::mat![

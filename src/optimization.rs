@@ -1,6 +1,8 @@
 use std::{collections::HashMap, convert::Infallible, ops::Range};
 
-use faer_ext::nalgebra::{DMatrixView, DimName, Dyn, Matrix, Storage, U1, storage::IsContiguous};
+use faer_ext::nalgebra::{
+    DMatrixView, Dim, DimName, Dyn, Matrix, Storage, U1, VectorView, storage::IsContiguous,
+};
 
 use crate::{
     BlockId, EvaluationError, Factor, FactorBatch, FactorId, JacobianBlock, LinearizationSink,
@@ -124,11 +126,11 @@ pub trait LeastSquaresBackend {
     /// Start a fresh linearization, discarding any previous factorization.
     fn clear(&mut self);
     /// Consume validated residuals and (column offset, Jacobian) pairs.
-    /// Runtime row counts also support internal marginal priors. The iterator
-    /// is clonable so dense backends can form cross terms without allocating.
-    fn accumulate<'a>(
+    /// Preserves static row dimensions; `Dyn` supports internal marginal priors.
+    /// The iterator is clonable so dense backends can form cross terms without allocating.
+    fn accumulate<'a, Rows: Dim>(
         &mut self,
-        residual: &[Self::Scalar],
+        residual: VectorView<'_, Self::Scalar, Rows>,
         jacobians: impl Iterator<Item = (usize, DMatrixView<'a, Self::Scalar, Dyn, Dyn>)> + Clone,
     ) -> Result<(), EvaluationError>;
     /// Infinity norm of the unmodified linearized gradient, rejecting nonfinite values.
@@ -584,7 +586,7 @@ impl<R: Real, B: LeastSquaresBackend<Scalar = R>> LinearizationSink for CheckedS
                 self.columns.push(block.offset);
             }
             self.backend.accumulate(
-                residual.as_slice(),
+                VectorView::<_, Rows>::from_slice(residual.as_slice()),
                 jacobians
                     .iter()
                     .zip(self.columns.iter())

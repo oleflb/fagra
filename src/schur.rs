@@ -12,7 +12,7 @@ use faer::{
     mat::AsMatMut,
     matrix_free::{InitialGuessStatus, LinOp, Precond, conjugate_gradient as cg},
 };
-use faer_ext::nalgebra::{DMatrixView, Dyn};
+use faer_ext::nalgebra::{DMatrixView, Dim, Dyn, VectorView};
 use std::{
     sync::Mutex,
     time::{Duration, Instant},
@@ -428,9 +428,9 @@ impl<R: Real> LeastSquaresBackend for Schur<R> {
         self.cross.clear();
         self.model.clear();
     }
-    fn accumulate<'a>(
+    fn accumulate<'a, Rows: Dim>(
         &mut self,
-        residual: &[R],
+        residual: VectorView<'_, R, Rows>,
         jacobians: impl Iterator<Item = (usize, DMatrixView<'a, R, Dyn, Dyn>)> + Clone,
     ) -> Result<(), EvaluationError> {
         self.ready = false;
@@ -462,7 +462,7 @@ impl<R: Real> LeastSquaresBackend for Schur<R> {
                 right = Some((col - self.retained, start + index));
             }
         }
-        self.model.accumulate(residual, jacobians)?;
+        self.model.accumulate(residual.as_slice(), jacobians)?;
         if let (Some((retained, left)), Some((eliminated, right))) = (left, right) {
             self.edges.push(Edge {
                 retained,
@@ -700,7 +700,7 @@ mod tests {
                 // Reverse emission order; repeated camera-point pairs are legal.
                 backend
                     .accumulate(
-                        residual.as_slice(),
+                        residual.column(0),
                         [(point, b.as_view()), (cam, a.as_view())].into_iter(),
                     )
                     .unwrap();
@@ -713,7 +713,10 @@ mod tests {
             for (i, col) in [0, 8].into_iter().enumerate() {
                 let a = SMatrix::<R, 1, 2>::new(c(0.5), c(-1.));
                 backend
-                    .accumulate(&[c(0.7)], std::iter::once((col, a.as_view())))
+                    .accumulate(
+                        SVector::from([c(0.7)]).column(0),
+                        std::iter::once((col, a.as_view())),
+                    )
                     .unwrap();
                 j.view_mut((10 + i, col), (1, 2))
                     .copy_from(&a.map(Into::into));
@@ -792,16 +795,25 @@ mod tests {
         backend.prepare(6).unwrap();
         backend.clear();
         assert!(matches!(
-            backend.accumulate(&[1.], [(2, j.as_view()), (4, j.as_view())].into_iter()),
+            backend.accumulate(
+                SVector::from([1.]).column(0),
+                [(2, j.as_view()), (4, j.as_view())].into_iter()
+            ),
             Err(EvaluationError::UnsupportedStructure)
         ));
         assert!(matches!(
-            backend.accumulate(&[1.], std::iter::once((1, j.as_view()))),
+            backend.accumulate(
+                SVector::from([1.]).column(0),
+                std::iter::once((1, j.as_view()))
+            ),
             Err(EvaluationError::UnsupportedStructure)
         ));
         assert!(backend.solve_damped(0.1).is_err());
         backend
-            .accumulate(&[1.], [(0, j.as_view()), (2, j.as_view())].into_iter())
+            .accumulate(
+                SVector::from([1.]).column(0),
+                [(0, j.as_view()), (2, j.as_view())].into_iter(),
+            )
             .unwrap();
         backend.prepare_damping(0.1).unwrap();
         assert!(backend.solve_damped(0.).is_err());
@@ -815,7 +827,10 @@ mod tests {
         let mut retained_coupling = Schur::new(4, 2, 2);
         retained_coupling.prepare(6).unwrap();
         assert!(matches!(
-            retained_coupling.accumulate(&[1.], [(0, j.as_view()), (2, j.as_view())].into_iter()),
+            retained_coupling.accumulate(
+                SVector::from([1.]).column(0),
+                [(0, j.as_view()), (2, j.as_view())].into_iter()
+            ),
             Err(EvaluationError::UnsupportedStructure)
         ));
         let identity = SMatrix::<f64, 2, 2>::identity();
@@ -823,7 +838,10 @@ mod tests {
         undamped.prepare(4).unwrap();
         for col in [0, 2] {
             undamped
-                .accumulate(&[1., 2.], std::iter::once((col, identity.as_view())))
+                .accumulate(
+                    SVector::from([1., 2.]).column(0),
+                    std::iter::once((col, identity.as_view())),
+                )
                 .unwrap();
         }
         for _ in 0..2 {
@@ -836,8 +854,11 @@ mod tests {
             b.prepare(n).unwrap();
             b.clear();
             if n != 0 {
-                b.accumulate(&[1.], std::iter::once((0, j.as_view())))
-                    .unwrap();
+                b.accumulate(
+                    SVector::from([1.]).column(0),
+                    std::iter::once((0, j.as_view())),
+                )
+                .unwrap();
             }
             b.prepare_damping(0.1).unwrap();
             assert!(b.solve_damped(0.1).is_ok());

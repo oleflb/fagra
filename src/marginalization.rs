@@ -16,7 +16,7 @@ use faer::{
 };
 use faer_ext::{
     IntoNalgebra,
-    nalgebra::{DMatrixView, DimName, Dyn},
+    nalgebra::{DMatrixView, DVectorView, Dim, DimName, Dyn, VectorView},
 };
 
 use crate::{
@@ -219,7 +219,7 @@ impl<R: Real> Priors<R> {
                 continue;
             }
             backend.accumulate(
-                prior.residual.as_slice(),
+                DVectorView::from_slice(prior.residual.as_slice(), prior.residual.len()),
                 prior.blocks.iter().map(|(id, range)| {
                     let column = layout.blocks[layout.block_index[id]].offset;
                     (
@@ -253,9 +253,9 @@ impl<R: Real> LeastSquaresBackend for Rows<R> {
     fn clear(&mut self) {
         self.values.clear();
     }
-    fn accumulate<'a>(
+    fn accumulate<'a, D: Dim>(
         &mut self,
-        residual: &[R],
+        residual: VectorView<'_, R, D>,
         jacobians: impl Iterator<Item = (usize, DMatrixView<'a, R, Dyn, Dyn>)> + Clone,
     ) -> Result<(), EvaluationError> {
         let stride = self
