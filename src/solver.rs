@@ -303,7 +303,7 @@ where
     ///
     /// QR acts directly on Jacobian rows; no normal equations or damping are used.
     /// Rank deficiency is supported, but no nonlinear observability/FEJ policy is
-    /// imposed. Use LSMR for optimization if normal equations must also be avoided
+    /// imposed. Use DenseQr or LSMR if normal equations must also be avoided
     /// in the nonlinear solve.
     pub fn marginalize_with(
         &mut self,

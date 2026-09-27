@@ -258,7 +258,7 @@ let (report, covariance) = solver.optimize_with_covariance(
 )?;
 ```
 
-This supports GN with dense Cholesky, LSMR, or Schur, and LM with LSMR or Schur.
+Both GN and LM support dense Cholesky, dense QR, LSMR, and Schur.
 Successful LM convergence already has current Jacobians; extraction does not
 evaluate factors again. GN refreshes after cost-based termination if necessary.
 Covariance failure preserves accepted estimates. The standalone query always
@@ -271,7 +271,7 @@ copy is needed beyond the next mutable use of the solver.
 
 Extraction factors the undamped information `H = L Lᵀ`, solves `L Y = E` for the
 selected coordinate columns, and returns `Yᵀ Y`; it never forms the full inverse.
-Dense GN reuses its current factorization when available. LSMR/Schur assemble
+Dense Cholesky reuses its undamped factorization when available. QR/LSMR/Schur assemble
 dense information from their cached, unscaled Jacobians once at extraction time.
 This implementation uses **O(n²) storage and O(n³) factorization**, even for small
 selections; selected extraction costs O(n² k + n k²). It is intended for bounded
@@ -388,8 +388,13 @@ steps remain. Iteration exhaustion returns `NoConvergence`. Cholesky failure ret
 `LinearSolveFailed`; every stored variable contributes coordinates, so unobserved
 variables and gauge freedoms can make a required solve singular.
 
-`GaussNewton::new(DenseNormalCholesky::default())` explicitly selects the dense
-backend. For matrix-free LSMR:
+`GaussNewton::new(DenseNormalCholesky::default())` explicitly selects normal
+equations. For a direct solve without squaring the Jacobian's condition number,
+use `GaussNewton::new(DenseQr::default())` (import `fagra::DenseQr`). It uses
+column-pivoted QR and rejects numerical rank deficiency instead of computing a
+pseudoinverse. `relative_rank_tolerance` defaults to `64 * epsilon`, relative to
+the largest QR pivot; adjust it for the model's scale. Dense QR retains O(mn)
+storage for m residual rows and n coordinates. For matrix-free LSMR:
 
 ```rust
 use fagra::{GaussNewton, Lsmr, OptimizeOptions};
@@ -423,8 +428,8 @@ let report = result?;
 ```
 
 LM solves `||J delta + r||² + lambda ||D delta||²`, with `D` derived from
-Jacobian column norms. Damping rows are implicit: no normal equations or dense
-diagonal matrix are formed. Rejected attempts reuse the cached Jacobians and all
+Jacobian column norms. With LSMR, damping rows are implicit: no normal equations or dense
+diagonal matrix are formed. Rejected attempts reuse the cached model and all
 buffers; they only repeat the linear solve, retraction, and cost evaluation.
 Warm calls within retained capacity are allocation-free when user code is too.
 
@@ -459,8 +464,18 @@ Small accepted steps with small cost changes trigger a fresh gradient check rath
 than declaring an over-damped step converged. Set `step_tolerance = 0` to disable
 that stagnation check; `cost_tolerance = 0` disables its additional cost condition.
 Marginal priors participate in costs and Jacobians, but optimizer damping is never
-marginalized. The default `solver.optimize()` remains GN with Cholesky; LM supports
-LSMR and the bipartite Schur backend below. See [GN versus LM measurements](docs/lm-performance.md).
+marginalized. The default `solver.optimize()` remains GN with Cholesky. LM also supports
+`LevenbergMarquardt::new(DenseNormalCholesky::default())` and
+`LevenbergMarquardt::new(DenseQr::default())`, as well as LSMR and the bipartite
+Schur backend below. Cholesky lazily allocates a working copy to factor
+`JᵀJ + lambda D²`; its GN path retains the original in-place solve. QR factors
+`[J D^-1; sqrt(lambda) I]` in scaled coordinates on each retry, then recovers
+`delta = D^-1 z`, retaining O((m+n)n) storage. Its LM rank cutoff applies to the
+scaled matrix so variable units do not determine the rank decision. Both preserve
+the undamped model for prediction and covariance. Positive damping can regularize
+rank-deficient models; the resulting system must still be numerically solvable.
+QR covariance uses normal equations, like LSMR/Schur covariance.
+See [GN versus LM measurements](docs/lm-performance.md).
 
 ### Iterative Schur for bipartite graphs
 

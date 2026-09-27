@@ -180,9 +180,10 @@ priors, separating nonlinear orchestration from graph ownership.
 borrowed solution slice. Runtime row counts support marginal priors without
 weakening the public factor API's compile-time dimension checks.
 Its representation is unconstrained: QR can retain rows, while CG can use a matrix
-or block operator. `DampedLeastSquaresBackend` adds preparation of fixed column-norm
-scales and repeatable damped solves with predicted reduction. LSMR and Schur implement it;
-normal-equation Cholesky retains its existing destructive, undamped solve.
+or block operator. The same trait includes preparation of fixed column-norm
+scales and repeatable damped solves with predicted reduction. Cholesky, QR, LSMR,
+and Schur implement both paths. GN still calls `solve()` directly, preserving each
+backend's existing fast path. Both optimizers use static dispatch.
 
 LM uses `D_j = max(||J[:,j]||, min_column_norm)` and the implicit operator
 `[J; sqrt(lambda) D]`. Column norms are computed once per linearization; the base
@@ -246,7 +247,7 @@ gradient. Diagnostic counters remain available after ordinary errors.
 `Lsmr<R>` use faer's scalar-generic kernels and scratch sizing. There are no
 precision conversions in the evaluation or optimization path.
 
-The first backend, `DenseNormalCholesky`, streams small dense block products into
+For GN, `DenseNormalCholesky` streams small dense block products into
 one preallocated normal matrix's lower triangle and accumulates `b = -Jᵀr`.
 Faer factorizes that matrix in place and overwrites `b` with delta. There is no
 global Jacobian, mirrored upper triangle, fagra-owned block-product temporary,
@@ -256,6 +257,22 @@ The implementation uses sequential kernels and disables dynamic pivot regulariza
 The dense allocation costs approximately `size_of::<R>() * n²` bytes; only the
 lower triangle is cleared, accumulated, and read. Normal equations square J's
 condition number.
+
+For LM, Cholesky lazily allocates a second matrix plus step/scaling buffers.
+Each retry copies the undamped lower triangle, adds `lambda D²`, and factorizes
+that working matrix. Prediction uses `-gᵀ delta - 0.5 deltaᵀ H delta` from the
+preserved model; covariance always uses undamped information.
+
+`DenseQr` in `src/qr.rs` caches the shared `LinearizedModel` and packs its blocks
+into a retained dense matrix. Faer's column-pivoted QR transforms the RHS, then
+back substitution unpermutes the step. LM factors `[J D^-1; sqrt(lambda) I]`
+and recovers `delta = D^-1 z`, preventing unused columns and mixed units from
+dominating the rank decision. It refactorizes for each retry. Prediction uses
+only the original-coordinate gradient and `J delta` product, without iterative
+residual diagnostics. The numerical
+rank cutoff is configurable and defaults to `64ε` times the largest absolute QR
+pivot; singular systems return `LinearSolveFailed`, without a pseudoinverse.
+QR covariance replays the cached blocks into the shared normal-equation path.
 
 ## Solver passes
 
@@ -398,7 +415,7 @@ to numerical rank decisions and floating-point roundoff.
 
 Residual-only cost is accumulated separately. Reports include it, while relative
 cost stopping excludes it so old irreducible cost does not mask active progress.
-The default optimizer still uses normal equations; use LSMR to avoid them during
+The default optimizer still uses normal equations; use DenseQr or LSMR to avoid them during
 optimization as well as marginalization.
 
 The first implementation scans graph metadata and forms one dense affected front.
