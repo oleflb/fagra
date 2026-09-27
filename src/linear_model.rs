@@ -229,25 +229,32 @@ impl<R: Real> LinearizedModel<R> {
         Ok(())
     }
 
-    /// Leaves the full damped normal residual and its initial gradient in original
-    /// coordinates. Each backend subsequently applies its own diagnostic transform.
-    pub fn verify_step(&self, work: &mut StepWorkspace<R>, lambda: R) -> StepVerification<R> {
+    /// Predict undamped improvement in original coordinates, leaving J*step in product.
+    pub fn predicted_reduction(&self, step: &[R], product: &mut [R]) -> R {
         let (m, n) = (self.jacobian.rows, self.jacobian.cols);
-        let finite_step = norm_inf(&work.step).is_ok();
         self.jacobian.apply(
-            MatMut::from_column_major_slice_mut(&mut work.product, m, 1),
-            MatRef::from_column_major_slice(&work.step, n, 1),
+            MatMut::from_column_major_slice_mut(product, m, 1),
+            MatRef::from_column_major_slice(step, n, 1),
             Par::Seq,
             MemStack::new(&mut []),
         );
         let half = R::from_f64_impl(0.5);
         let mut predicted_reduction = R::zero();
-        for (&g, &d) in self.gradient.iter().zip(&work.step) {
+        for (&g, &d) in self.gradient.iter().zip(step) {
             predicted_reduction -= g * d;
         }
-        for &v in &work.product {
+        for &v in product.iter() {
             predicted_reduction -= (half * v) * v;
         }
+        predicted_reduction
+    }
+
+    /// Leaves the full damped normal residual and its initial gradient in original
+    /// coordinates. Each backend subsequently applies its own diagnostic transform.
+    pub fn verify_step(&self, work: &mut StepWorkspace<R>, lambda: R) -> StepVerification<R> {
+        let (m, n) = (self.jacobian.rows, self.jacobian.cols);
+        let finite_step = norm_inf(&work.step).is_ok();
+        let predicted_reduction = self.predicted_reduction(&work.step, &mut work.product);
         for (v, &rhs) in work.product.iter_mut().zip(&self.negative_residual) {
             *v -= rhs;
         }

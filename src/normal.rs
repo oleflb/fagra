@@ -30,8 +30,8 @@ use crate::{
 /// undamped model while factoring `JᵀJ + lambda D²` on each retry.
 /// Uses sequential dense kernels, without pivot repair or an inverse.
 /// An undamped step requires a positive-definite normal matrix (full column rank of J).
-/// Normal equations square J's condition number.
-/// Matrix storage is O(n²), factorization O(n³).
+/// Normal equations square J's condition number; use [`crate::DenseQr`] for
+/// ill-conditioned problems. Matrix storage is O(n²), factorization O(n³).
 pub struct DenseNormalCholesky<R: Real = f64> {
     normal: Mat<R>,
     rhs: Vec<R>,

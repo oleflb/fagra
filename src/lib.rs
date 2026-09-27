@@ -38,6 +38,8 @@
 //! positive-definite normal matrix, so gauge freedoms need explicit constraints.
 //! Select [`Lsmr`] with `GaussNewton::new(Lsmr::default())` for an iterative solve
 //! using cached local Jacobians without assembling a global matrix.
+//! Select [`DenseQr`] for a direct Jacobian-based solve without normal equations.
+//! All backends support both Gauss–Newton and Levenberg–Marquardt.
 //! [`LevenbergMarquardt`] defaults to LSMR with implicit scaled damping. It rejects
 //! uphill or invalid trials, reusing the same linearization across bounded retries.
 //! Inspect [`LevenbergMarquardt::statistics`] for progress even after an error.
@@ -77,6 +79,7 @@ mod lsmr;
 mod marginalization;
 mod normal;
 mod optimization;
+mod qr;
 mod real;
 mod schur;
 mod solver;
@@ -100,6 +103,7 @@ pub use optimization::{
     GaussNewton, LevenbergMarquardt, LmOptions, LmStatistics, OptimizeOptions, OptimizeReport,
     TerminationReason, TrialFailure,
 };
+pub use qr::DenseQr;
 pub use real::Real;
 pub use schur::{Schur, SchurDiagnostics, SchurStatistics, SchurTermination, SchurTimings};
 pub use solver::{Problem, Solver};

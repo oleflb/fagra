@@ -267,8 +267,32 @@ fn retries_cache_jacobians_and_handle_invalid_trials_in_both_precisions() {
     }
     check::<f64, Lsmr<f64>>();
     check::<f32, Lsmr<f32>>();
+    check::<f64, fagra::DenseQr<f64>>();
+    check::<f32, fagra::DenseQr<f32>>();
     check::<f64, fagra::DenseNormalCholesky<f64>>();
     check::<f32, fagra::DenseNormalCholesky<f32>>();
+}
+
+#[test]
+fn qr_lm_default_options_allow_an_unused_variable() {
+    fn check<R: Real>() {
+        let mut graph = fagra::Problem::<scalar::States<R>, scalar::Factors<R>>::new();
+        let unused = graph.add(Scalar(R::from_f64_impl(7.)));
+        let x = graph.add(Scalar(R::zero()));
+        graph
+            .add_factor(scalar::Prior {
+                variable: x,
+                measurement: R::one(),
+            })
+            .unwrap();
+        let mut method = LevenbergMarquardt::new(fagra::DenseQr::<R>::default());
+        let report = method.solve_batch(&mut graph, &Default::default()).unwrap();
+        assert!(report.final_cost < report.initial_cost);
+        assert!((graph.get(x).unwrap().0 - R::one()).abs() < R::from_f64_impl(1e-5));
+        assert_eq!(graph.get(unused).unwrap().0, R::from_f64_impl(7.));
+    }
+    check::<f32>();
+    check::<f64>();
 }
 
 #[test]
@@ -466,6 +490,7 @@ fn lm_evaluates_marginal_priors_and_does_not_marginalize_damping() {
         assert!((reference.final_cost - first.final_cost).abs() < 1e-10);
     }
     check::<Lsmr>();
+    check::<fagra::DenseQr>();
     check::<fagra::DenseNormalCholesky>();
 }
 
@@ -724,8 +749,10 @@ fn scoped_covariance_reuses_hot_workspace_for_all_backends() {
         }
     }
     check(GaussNewton::default());
+    check(GaussNewton::new(fagra::DenseQr::default()));
     check(GaussNewton::new(Lsmr::default()));
     check(LevenbergMarquardt::default());
+    check(LevenbergMarquardt::new(fagra::DenseQr::default()));
     check(LevenbergMarquardt::new(
         fagra::DenseNormalCholesky::default(),
     ));
