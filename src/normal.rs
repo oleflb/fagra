@@ -16,7 +16,7 @@ use faer_ext::{
 
 use crate::{
     EvaluationError, Real, SolverError,
-    optimization::{LeastSquaresBackend, norm_inf},
+    optimization::{DampedStep, LeastSquaresBackend, norm_inf},
 };
 
 /// Dense normal equations solved by in-place faer Cholesky.
@@ -26,10 +26,12 @@ use crate::{
 /// Factorization overwrites that triangle; solving overwrites the RHS with delta.
 /// Buffers and scratch are retained.
 ///
-/// Uses sequential dense kernels and no damping, pivot repair, or inverse.
-/// A step requires a positive-definite normal matrix (full column rank of J).
-/// Normal equations square J's condition number; use a future QR backend for
-/// ill-conditioned problems. Matrix storage is O(n²), factorization O(n³).
+/// LM lazily allocates a second matrix and step/scaling buffers, preserving the
+/// undamped model while factoring `JᵀJ + lambda D²` on each retry.
+/// Uses sequential dense kernels, without pivot repair or an inverse.
+/// An undamped step requires a positive-definite normal matrix (full column rank of J).
+/// Normal equations square J's condition number.
+/// Matrix storage is O(n²), factorization O(n³).
 pub struct DenseNormalCholesky<R: Real = f64> {
     normal: Mat<R>,
     rhs: Vec<R>,
@@ -37,6 +39,10 @@ pub struct DenseNormalCholesky<R: Real = f64> {
     scratch_dimension: usize,
     diagonal: Vec<R>,
     factorized: bool,
+    damped_normal: Mat<R>,
+    step: Vec<R>,
+    scales: Vec<R>,
+    damping_ready: bool,
 }
 
 impl<R: Real> Default for DenseNormalCholesky<R> {
@@ -48,6 +54,10 @@ impl<R: Real> Default for DenseNormalCholesky<R> {
             scratch_dimension: 0,
             diagonal: Vec::new(),
             factorized: false,
+            damped_normal: Mat::new(),
+            step: Vec::new(),
+            scales: Vec::new(),
+            damping_ready: false,
         }
     }
 }
@@ -56,6 +66,7 @@ impl<R: Real> LeastSquaresBackend for DenseNormalCholesky<R> {
     type Scalar = R;
 
     fn prepare(&mut self, dimension: usize) -> Result<(), SolverError> {
+        self.damping_ready = false;
         dimension
             .checked_mul(dimension)
             .and_then(|n| n.checked_mul(size_of::<R>()))
@@ -78,6 +89,7 @@ impl<R: Real> LeastSquaresBackend for DenseNormalCholesky<R> {
     }
 
     fn clear(&mut self) {
+        self.damping_ready = false;
         self.factorized = false;
         let n = self.rhs.len();
         for col in 0..n {
@@ -95,6 +107,7 @@ impl<R: Real> LeastSquaresBackend for DenseNormalCholesky<R> {
         residual: VectorView<'_, R, Rows>,
         jacobians: impl Iterator<Item = (usize, DMatrixView<'a, R, Dyn, Dyn>)> + Clone,
     ) -> Result<(), EvaluationError> {
+        self.damping_ready = false;
         // Static dimensions select their kernel at monomorphization. Only Dyn
         // needs to recover a static loop bound for the small-row kernel.
         match (Rows::try_to_usize(), residual.nrows()) {
@@ -125,6 +138,7 @@ impl<R: Real> LeastSquaresBackend for DenseNormalCholesky<R> {
     }
 
     fn solve(&mut self) -> Result<&[R], SolverError> {
+        self.damping_ready = false;
         let n = self.rhs.len();
         if n == 0 {
             return Ok(&self.rhs);
@@ -138,6 +152,83 @@ impl<R: Real> LeastSquaresBackend for DenseNormalCholesky<R> {
             stack,
         );
         Ok(&self.rhs)
+    }
+
+    fn prepare_damping(&mut self, min_column_norm: R) -> Result<(), SolverError> {
+        self.damping_ready = false;
+        if self.factorized || !min_column_norm.is_finite() || min_column_norm <= R::zero() {
+            return Err(SolverError::InvalidOptions);
+        }
+        let n = self.rhs.len();
+        norm_inf(&self.rhs)?;
+        self.damped_normal.resize_with(n, n, |_, _| R::zero());
+        self.step.resize(n, R::zero());
+        self.scales.resize(n, R::zero());
+        for col in 0..n {
+            for row in col..n {
+                if !self.normal[(row, col)].is_finite() {
+                    return Err(EvaluationError::InvalidEvaluation.into());
+                }
+            }
+            if self.normal[(col, col)] < R::zero() {
+                return Err(EvaluationError::InvalidEvaluation.into());
+            }
+            self.scales[col] = self.normal[(col, col)].sqrt().max(min_column_norm);
+        }
+        self.damping_ready = true;
+        Ok(())
+    }
+
+    fn solve_damped(&mut self, lambda: R) -> Result<DampedStep<'_, R>, SolverError> {
+        if !self.damping_ready || !lambda.is_finite() || lambda < R::zero() {
+            return Err(SolverError::InvalidOptions);
+        }
+        let n = self.rhs.len();
+        for col in 0..n {
+            for row in col..n {
+                self.damped_normal[(row, col)] = self.normal[(row, col)];
+            }
+            let d = lambda.sqrt() * self.scales[col];
+            self.damped_normal[(col, col)] += d * d;
+            if !self.damped_normal[(col, col)].is_finite() {
+                return Err(SolverError::LinearSolveFailed);
+            }
+        }
+        self.step.copy_from_slice(&self.rhs);
+        if n > 0 {
+            let stack = MemStack::new(self.scratch.as_mut().expect("prepared Cholesky workspace"));
+            llt::factor::cholesky_in_place(
+                self.damped_normal.as_mut(),
+                Default::default(),
+                Par::Seq,
+                stack,
+                Default::default(),
+            )
+            .map_err(|_| SolverError::LinearSolveFailed)?;
+            llt::solve::solve_in_place(
+                self.damped_normal.as_ref(),
+                MatMut::from_column_major_slice_mut(&mut self.step, n, 1),
+                Par::Seq,
+                stack,
+            );
+        }
+        norm_inf(&self.step).map_err(|_| SolverError::LinearSolveFailed)?;
+        let mut predicted_reduction = R::zero();
+        for col in 0..n {
+            let d = self.step[col];
+            predicted_reduction +=
+                self.rhs[col] * d - R::from_f64_impl(0.5) * d * self.normal[(col, col)] * d;
+            for row in col + 1..n {
+                predicted_reduction -= d * self.normal[(row, col)] * self.step[row];
+            }
+        }
+        if !predicted_reduction.is_finite() {
+            return Err(SolverError::LinearSolveFailed);
+        }
+        Ok(DampedStep {
+            delta: &self.step,
+            predicted_reduction,
+        })
     }
 }
 
@@ -248,6 +339,7 @@ impl<R: Real> DenseNormalCholesky<R> {
     }
 
     pub(crate) fn factorize(&mut self) -> Result<(), SolverError> {
+        self.damping_ready = false;
         if self.factorized {
             return Ok(());
         }

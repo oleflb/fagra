@@ -140,6 +140,15 @@ pub trait LeastSquaresBackend {
     /// step's finiteness before retraction; no separate output copy is required.
     /// May destroy the model and RHS: call once per completed linearization.
     fn solve(&mut self) -> Result<&[Self::Scalar], SolverError>;
+    /// Prepare fixed column-norm damping scales for the current linearization.
+    fn prepare_damping(&mut self, min_column_norm: Self::Scalar) -> Result<(), SolverError>;
+    /// Solve `||J delta + r||² + lambda ||D delta||²`, preserving the undamped
+    /// model across retries. Requires `prepare_damping` after each model change.
+    /// Lambda must be finite and nonnegative; zero gives the undamped problem.
+    fn solve_damped(
+        &mut self,
+        lambda: Self::Scalar,
+    ) -> Result<DampedStep<'_, Self::Scalar>, SolverError>;
 }
 
 /// A damped step and its predicted reduction in the undamped local objective.
@@ -148,18 +157,6 @@ pub struct DampedStep<'a, R> {
     pub delta: &'a [R],
     /// `-gᵀ delta - 0.5 ||J delta||²`, valid for approximate linear solves too.
     pub predicted_reduction: R,
-}
-
-/// Backend capability for retrying a cached linearization with diagonal damping.
-pub trait DampedLeastSquaresBackend: LeastSquaresBackend {
-    /// Prepare fixed column-norm damping scales for this linearization.
-    fn prepare_damping(&mut self, min_column_norm: Self::Scalar) -> Result<(), SolverError>;
-    /// Solve `||J delta + r||² + lambda ||D delta||²` without destroying the
-    /// cached undamped model. Repeated calls may change only `lambda`.
-    fn solve_damped(
-        &mut self,
-        lambda: Self::Scalar,
-    ) -> Result<DampedStep<'_, Self::Scalar>, SolverError>;
 }
 
 pub(crate) struct Workspace<B> {

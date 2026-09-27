@@ -2,7 +2,7 @@
 #[path = "bal/model.rs"]
 mod model;
 use fagra::{
-    __private::DampedLeastSquaresBackend, LevenbergMarquardt, Lsmr, OptimizeOptions, Schur, Solver,
+    __private::LeastSquaresBackend, LevenbergMarquardt, Lsmr, OptimizeOptions, Schur, Solver,
 };
 use model::*;
 use std::{
@@ -47,7 +47,7 @@ struct Measurements {
     verification: Duration,
 }
 
-trait BenchmarkBackend: DampedLeastSquaresBackend<Scalar = f64> {
+trait BenchmarkBackend: LeastSquaresBackend<Scalar = f64> {
     fn measurements(&self) -> Measurements;
     fn print_diagnostics(&self, run: usize);
 }

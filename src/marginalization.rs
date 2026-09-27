@@ -287,6 +287,15 @@ impl<R: Real> LeastSquaresBackend for Rows<R> {
     fn solve(&mut self) -> Result<&[R], SolverError> {
         unreachable!("row collector")
     }
+    fn prepare_damping(&mut self, _: R) -> Result<(), SolverError> {
+        unreachable!("row collector")
+    }
+    fn solve_damped(
+        &mut self,
+        _: R,
+    ) -> Result<crate::optimization::DampedStep<'_, R>, SolverError> {
+        unreachable!("row collector")
+    }
 }
 
 // faer 0.24 may shrink the other capacity when growing one dimension. Reserve

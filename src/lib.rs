@@ -119,9 +119,7 @@ pub mod __private {
     };
     pub use crate::factors::{FactorSchema, FactorStore, FactorVisitor};
     pub use crate::marginalization::Priors;
-    pub use crate::optimization::{
-        DampedLeastSquaresBackend, DampedStep, LeastSquaresBackend, Optimizer,
-    };
+    pub use crate::optimization::{DampedStep, LeastSquaresBackend, Optimizer};
     pub use crate::states::{StateSchema, StateVisitor};
     pub use crate::storage::{BatchPool, FactorPool, PoolAccess, StatePool};
 }

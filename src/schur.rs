@@ -4,7 +4,7 @@ use crate::{
     linear_model::{
         LinearizedModel, StepWorkspace, block_factors::BlockFactors, relative, relative_norm,
     },
-    optimization::{DampedLeastSquaresBackend, DampedStep, LeastSquaresBackend, norm_inf},
+    optimization::{DampedStep, LeastSquaresBackend, norm_inf},
 };
 use faer::{
     MatMut, MatRef, Par,
@@ -480,19 +480,6 @@ impl<R: Real> LeastSquaresBackend for Schur<R> {
         self.prepare_damping(R::from_f64_impl(1e-6))?;
         self.solve_damped(R::zero()).map(|s| s.delta)
     }
-}
-
-impl<R: Real> crate::covariance::CovarianceBackend for Schur<R> {
-    fn covariance(
-        &mut self,
-        normal: &mut crate::DenseNormalCholesky<R>,
-        selected: &mut crate::covariance::SelectedCovariance<R>,
-    ) -> Result<(), SolverError> {
-        self.model.covariance(normal, selected)
-    }
-}
-
-impl<R: Real> DampedLeastSquaresBackend for Schur<R> {
     fn prepare_damping(&mut self, min_column_norm: R) -> Result<(), SolverError> {
         self.ready = false;
         let start = self.collect_timings.then(Instant::now);
@@ -548,6 +535,16 @@ impl<R: Real> DampedLeastSquaresBackend for Schur<R> {
             delta: &self.work.step,
             predicted_reduction,
         })
+    }
+}
+
+impl<R: Real> crate::covariance::CovarianceBackend for Schur<R> {
+    fn covariance(
+        &mut self,
+        normal: &mut crate::DenseNormalCholesky<R>,
+        selected: &mut crate::covariance::SelectedCovariance<R>,
+    ) -> Result<(), SolverError> {
+        self.model.covariance(normal, selected)
     }
 }
 

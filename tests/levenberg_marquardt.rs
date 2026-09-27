@@ -195,7 +195,7 @@ fagra::factors! { Factors<R> { curves: Curve<R>, links: Link<R> } }
 
 #[test]
 fn retries_cache_jacobians_and_handle_invalid_trials_in_both_precisions() {
-    fn check<R: Real>() {
+    fn check<R: Real, B: fagra::__private::CovarianceBackend<Scalar = R> + Default>() {
         let c = R::from_f64_impl;
         for (kind, initial, target) in [
             (Kind::Atan, 2., 0.),
@@ -216,7 +216,7 @@ fn retries_cache_jacobians_and_handle_invalid_trials_in_both_precisions() {
                     malformed: false,
                 })
                 .unwrap();
-            let mut method = LevenbergMarquardt::new(Lsmr::<R>::default());
+            let mut method = LevenbergMarquardt::new(B::default());
             let options = OptimizeOptions {
                 max_iterations: 100,
                 ..Default::default()
@@ -249,10 +249,26 @@ fn retries_cache_jacobians_and_handle_invalid_trials_in_both_precisions() {
             assert_eq!(stats.linearizations, stats.accepted_steps + 1);
             assert_eq!(calls.cost.get(), stats.cost_evaluations);
             assert!(stats.gradient_norm.unwrap() <= options.gradient_tolerance);
+
+            // Same graph and solver, including rejected retries, must reuse storage.
+            graph.set(x, Scalar(c(initial))).unwrap();
+            let (result, allocations, _) = measured(|| graph.optimize_with(&mut method, &options));
+            result.unwrap();
+            assert_eq!(allocations, 0, "{}", std::any::type_name::<B>());
+
+            // Both nonlinear methods accept the same backend, including covariance.
+            graph.set(x, Scalar(c(target + 0.01))).unwrap();
+            let mut gn = GaussNewton::new(B::default());
+            graph
+                .optimize_with_covariance(&mut gn, &options, &[x.block_id()], &Default::default())
+                .unwrap();
+            assert!((graph.get(x).unwrap().0 - c(target)).abs() < c(2e-5));
         }
     }
-    check::<f64>();
-    check::<f32>();
+    check::<f64, Lsmr<f64>>();
+    check::<f32, Lsmr<f32>>();
+    check::<f64, fagra::DenseNormalCholesky<f64>>();
+    check::<f32, fagra::DenseNormalCholesky<f32>>();
 }
 
 #[test]
@@ -392,61 +408,65 @@ fn linear_solve_failures_are_bounded_and_accepted_progress_survives_limits() {
 
 #[test]
 fn lm_evaluates_marginal_priors_and_does_not_marginalize_damping() {
-    let mut graph = Solver::<States<f64>, Factors<f64>>::new();
-    let x = graph.add(Scalar(0.0));
-    let y = graph.add(Scalar(0.0));
-    let reset = Rc::new(Cell::new(false));
-    for (key, target) in [(x, 1.0), (y, 6.0)] {
+    fn check<B: fagra::__private::LeastSquaresBackend<Scalar = f64> + Default>() {
+        let mut graph = Solver::<States<f64>, Factors<f64>>::new();
+        let x = graph.add(Scalar(0.0));
+        let y = graph.add(Scalar(0.0));
+        let reset = Rc::new(Cell::new(false));
+        for (key, target) in [(x, 1.0), (y, 6.0)] {
+            graph
+                .add_factor(Curve {
+                    key,
+                    target,
+                    kind: Kind::Linear,
+                    reset: reset.clone(),
+                    offset: 0.,
+                    calls: Rc::new(Calls::default()),
+                    malformed: false,
+                })
+                .unwrap();
+        }
         graph
+            .add_factor(Link {
+                a: x,
+                b: y,
+                difference: 2.,
+                reset,
+            })
+            .unwrap();
+        let mut lm = LevenbergMarquardt::new(B::default());
+        let first = graph.optimize_with(&mut lm, &Default::default()).unwrap();
+        assert!(first.final_cost > 0.0);
+        graph.marginalize(&[x.block_id()]).unwrap();
+        let prior = graph
             .add_factor(Curve {
-                key,
-                target,
+                key: y,
+                target: 8.,
                 kind: Kind::Linear,
-                reset: reset.clone(),
+                reset: Rc::new(Cell::new(false)),
                 offset: 0.,
                 calls: Rc::new(Calls::default()),
                 malformed: false,
             })
             .unwrap();
+        let result = graph.optimize_with(&mut lm, &Default::default()).unwrap();
+        // Marginalized x contributes (y-3)^2/(2*101), plus y's two unit priors.
+        let expected = (3.0 / 101.0 + 14.0) / (1.0 / 101.0 + 2.0);
+        assert!((graph.get(y).unwrap().0 - expected).abs() < 1e-8);
+        assert!(
+            (result.final_cost
+                - (0.5 * (expected - 3.0).powi(2) / 101.0
+                    + 0.5 * (expected - 6.0).powi(2)
+                    + 0.5 * (expected - 8.0).powi(2)))
+            .abs()
+                < 1e-10
+        );
+        graph.remove_factor(prior).unwrap();
+        let reference = graph.optimize().unwrap();
+        assert!((reference.final_cost - first.final_cost).abs() < 1e-10);
     }
-    graph
-        .add_factor(Link {
-            a: x,
-            b: y,
-            difference: 2.,
-            reset,
-        })
-        .unwrap();
-    let mut lm = LevenbergMarquardt::default();
-    let first = graph.optimize_with(&mut lm, &Default::default()).unwrap();
-    assert!(first.final_cost > 0.0);
-    graph.marginalize(&[x.block_id()]).unwrap();
-    let prior = graph
-        .add_factor(Curve {
-            key: y,
-            target: 8.,
-            kind: Kind::Linear,
-            reset: Rc::new(Cell::new(false)),
-            offset: 0.,
-            calls: Rc::new(Calls::default()),
-            malformed: false,
-        })
-        .unwrap();
-    let result = graph.optimize_with(&mut lm, &Default::default()).unwrap();
-    // Marginalized x contributes (y-3)^2/(2*101), plus y's two unit priors.
-    let expected = (3.0 / 101.0 + 14.0) / (1.0 / 101.0 + 2.0);
-    assert!((graph.get(y).unwrap().0 - expected).abs() < 1e-8);
-    assert!(
-        (result.final_cost
-            - (0.5 * (expected - 3.0).powi(2) / 101.0
-                + 0.5 * (expected - 6.0).powi(2)
-                + 0.5 * (expected - 8.0).powi(2)))
-        .abs()
-            < 1e-10
-    );
-    graph.remove_factor(prior).unwrap();
-    let reference = graph.optimize().unwrap();
-    assert!((reference.final_cost - first.final_cost).abs() < 1e-10);
+    check::<Lsmr>();
+    check::<fagra::DenseNormalCholesky>();
 }
 
 #[derive(Debug)]
@@ -706,6 +726,9 @@ fn scoped_covariance_reuses_hot_workspace_for_all_backends() {
     check(GaussNewton::default());
     check(GaussNewton::new(Lsmr::default()));
     check(LevenbergMarquardt::default());
+    check(LevenbergMarquardt::new(
+        fagra::DenseNormalCholesky::default(),
+    ));
     check(LevenbergMarquardt::new(fagra::Schur::new(1, 1, 1)));
 }
 

@@ -4,7 +4,7 @@ use faer::traits::ComplexField as _;
 use faer_ext::nalgebra::{ComplexField as _, RealField as _};
 
 use super::{
-    Accept, DampedLeastSquaresBackend, OptimizeOptions, OptimizeReport, Optimizer, Stage,
+    Accept, LeastSquaresBackend, OptimizeOptions, OptimizeReport, Optimizer, Stage,
     TerminationReason, Trial, Workspace, cost, norm_inf,
 };
 use crate::{
@@ -136,7 +136,7 @@ impl<R: Real> Default for LmStatistics<R> {
 /// rather than declaring an over-damped step converged. Set the shared step
 /// tolerance to zero to disable stagnation detection; a zero cost tolerance
 /// disables the additional cost-change condition.
-pub struct LevenbergMarquardt<B: DampedLeastSquaresBackend = Lsmr> {
+pub struct LevenbergMarquardt<B: LeastSquaresBackend = Lsmr> {
     /// Method-specific controls; validated before graph evaluation.
     pub options: LmOptions<B::Scalar>,
     /// Optional observer after each accepted step. Default: None.
@@ -145,7 +145,7 @@ pub struct LevenbergMarquardt<B: DampedLeastSquaresBackend = Lsmr> {
     work: Workspace<B>,
     statistics: LmStatistics<B::Scalar>,
 }
-impl<B: DampedLeastSquaresBackend> LevenbergMarquardt<B> {
+impl<B: LeastSquaresBackend> LevenbergMarquardt<B> {
     /// Solve and extract covariance from the final undamped model.
     /// The returned matrix borrows the problem's retained query workspace.
     #[allow(clippy::type_complexity)]
@@ -205,7 +205,7 @@ impl<S, F, B> Optimizer<S, F> for LevenbergMarquardt<B>
 where
     S: StateSchema,
     F: FactorSchema<S, Scalar = S::Scalar>,
-    B: DampedLeastSquaresBackend<Scalar = S::Scalar>,
+    B: LeastSquaresBackend<Scalar = S::Scalar>,
 {
     fn optimize(
         &mut self,
@@ -349,7 +349,7 @@ impl<S, F, B> crate::covariance::CovarianceOptimizer<S, F> for LevenbergMarquard
 where
     S: StateSchema,
     F: FactorSchema<S, Scalar = S::Scalar>,
-    B: DampedLeastSquaresBackend<Scalar = S::Scalar> + crate::covariance::CovarianceBackend,
+    B: LeastSquaresBackend<Scalar = S::Scalar> + crate::covariance::CovarianceBackend,
 {
     fn optimize_covariance(
         &mut self,

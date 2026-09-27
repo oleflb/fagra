@@ -17,7 +17,7 @@ use crate::{
     linear_model::{
         Jacobian, LinearizedModel, StepWorkspace, block_factors::BlockFactors, norm_l2, relative,
     },
-    optimization::{DampedLeastSquaresBackend, DampedStep, LeastSquaresBackend, norm_inf},
+    optimization::{DampedStep, LeastSquaresBackend, norm_inf},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -526,19 +526,6 @@ impl<R: Real> LeastSquaresBackend for Lsmr<R> {
         result?;
         Ok(&self.work.step)
     }
-}
-
-impl<R: Real> crate::covariance::CovarianceBackend for Lsmr<R> {
-    fn covariance(
-        &mut self,
-        normal: &mut crate::DenseNormalCholesky<R>,
-        selected: &mut crate::covariance::SelectedCovariance<R>,
-    ) -> Result<(), SolverError> {
-        self.model.covariance(normal, selected)
-    }
-}
-
-impl<R: Real> DampedLeastSquaresBackend for Lsmr<R> {
     fn prepare_damping(&mut self, min_column_norm: R) -> Result<(), SolverError> {
         let start = self.collect_timings.then(Instant::now);
         self.prepared_mode = None;
@@ -597,6 +584,16 @@ impl<R: Real> DampedLeastSquaresBackend for Lsmr<R> {
             delta: &self.work.step,
             predicted_reduction,
         })
+    }
+}
+
+impl<R: Real> crate::covariance::CovarianceBackend for Lsmr<R> {
+    fn covariance(
+        &mut self,
+        normal: &mut crate::DenseNormalCholesky<R>,
+        selected: &mut crate::covariance::SelectedCovariance<R>,
+    ) -> Result<(), SolverError> {
+        self.model.covariance(normal, selected)
     }
 }
 
