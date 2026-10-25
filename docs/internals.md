@@ -239,7 +239,16 @@ with a growing multiplier. Trial guards reject invalid or uphill candidates and
 restore every state family before another attempt. Damping, retries, and accepted
 steps are bounded. Jacobians are reevaluated only after acceptance, including a
 final gradient check. Small-step stagnation cannot report convergence with a large
-gradient. Diagnostic counters remain available after ordinary errors.
+gradient. Before a stagnation exit, one undamped trial per optimization call may
+use a remaining accepted-step slot. It uses the freshly linearized model and the
+same transactional acceptance/rejection path, with no relaxation of prediction,
+actual decrease, gain ratio, gradient tolerance or undamped covariance rank checks.
+Rejection or linear-solve failure ends that recovery attempt with `NoProgress`;
+it does not start a zero-damping retry loop. An accepted recovery consumes the
+ordinary iteration budget; the positive damping schedule is retained for any
+further regular steps. Ordinary retry exhaustion does not trigger this fallback.
+Diagnostic counters remain available after ordinary errors, including zero damping
+for the guarded trial. No recovery/damping state carries across optimization calls.
 
 `LeastSquaresBackend::Scalar` determines the coefficients and step buffer, and
 `GaussNewton<B>` requires it to match the schemas. `OptimizeOptions<R>` and

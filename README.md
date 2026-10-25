@@ -465,8 +465,15 @@ Retry exhaustion or stagnation returns `NoProgress`, retaining accepted estimate
 
 On nonempty graphs LM reports success only after checking gradient tolerance.
 Small accepted steps with small cost changes trigger a fresh gradient check rather
-than declaring an over-damped step converged. Set `step_tolerance = 0` to disable
-that stagnation check; `cost_tolerance = 0` disables its additional cost condition.
+than declaring an over-damped step converged. If the gradient is still too large
+and an accepted-step slot remains, LM tries one undamped step, at most once per
+optimization call, before returning `NoProgress`. This exception to the positive
+`min_damping` bound uses the ordinary prediction, strict cost-decrease, gain-ratio
+and rollback checks; a fresh gradient must still establish convergence. A rejected
+undamped trial ends the call, not an unbounded retry sequence. Regular positive
+damping resumes if the trial is accepted but further nonstagnant progress is needed.
+Set `step_tolerance = 0` to disable that stagnation check; `cost_tolerance = 0`
+disables its additional cost condition.
 Marginal priors participate in costs and Jacobians, but optimizer damping is never
 marginalized. The default `solver.optimize()` remains GN with Cholesky. LM also supports
 `LevenbergMarquardt::new(DenseNormalCholesky::default())` and

@@ -17,7 +17,8 @@ use crate::{
 pub struct LmOptions<R: Real = f64> {
     /// Initial dimensionless damping, reset for each optimization call. Default: 1e-3.
     pub initial_damping: R,
-    /// Positive lower damping bound. Default: 1e-12.
+    /// Positive lower bound for regular damped trials. Default: 1e-12.
+    /// A guarded stagnation trial may use zero damping.
     pub min_damping: R,
     /// Finite upper damping bound. Default: 1e12.
     pub max_damping: R,
@@ -132,10 +133,12 @@ impl<R: Real> Default for LmStatistics<R> {
 /// the same rollback guard as GN, rather than being treated as rejected steps.
 ///
 /// Gradient tolerance establishes convergence. Small accepted steps with small
-/// cost changes trigger a fresh gradient check; if it fails, return `NoProgress`
-/// rather than declaring an over-damped step converged. Set the shared step
-/// tolerance to zero to disable stagnation detection; a zero cost tolerance
-/// disables the additional cost-change condition.
+/// cost changes trigger a fresh gradient check. If it fails and an accepted-step
+/// slot remains, try one transactional undamped step before `NoProgress`, at most
+/// once per call. It must pass the ordinary acceptance checks; only a fresh
+/// gradient check can establish convergence. Set the shared step tolerance to
+/// zero to disable stagnation detection; a zero cost tolerance disables the
+/// additional cost-change condition.
 pub struct LevenbergMarquardt<B: LeastSquaresBackend = Lsmr> {
     /// Method-specific controls; validated before graph evaluation.
     pub options: LmOptions<B::Scalar>,
@@ -227,6 +230,7 @@ where
         self.statistics.cost = Some(checked_cost(Ok(initial + constant))?);
         let mut current = initial;
         let mut stalled = false;
+        let mut tried_undamped = false;
         loop {
             if self.work.layout.dimension == 0 {
                 return Ok(OptimizeReport {
@@ -248,7 +252,9 @@ where
                     termination: TerminationReason::GradientTolerance,
                 });
             }
-            if stalled {
+            if stalled
+                && (tried_undamped || self.statistics.accepted_steps == options.max_iterations)
+            {
                 return Err(SolverError::NoProgress);
             }
             if self.statistics.accepted_steps == options.max_iterations {
@@ -257,12 +263,16 @@ where
             self.work
                 .backend
                 .prepare_damping(self.options.min_column_norm)?;
+            // Damping can suppress a weak full-rank direction before the gradient converges.
+            let undamped_trial = stalled;
+            tried_undamped |= undamped_trial;
             let mut growth = c(2.0);
             let mut accepted = false;
             for _ in 0..self.options.max_trials {
                 self.statistics.attempts += 1;
-                self.statistics.damping = lambda;
-                let rejection = match self.work.backend.solve_damped(lambda) {
+                let damping = if undamped_trial { c(0.0) } else { lambda };
+                self.statistics.damping = damping;
+                let rejection = match self.work.backend.solve_damped(damping) {
                     Err(SolverError::LinearSolveFailed) => TrialFailure::LinearSolve,
                     Err(error) => return Err(error),
                     Ok(step) => {
@@ -332,7 +342,7 @@ where
                 };
                 self.statistics.rejected_steps += 1;
                 self.statistics.last_rejection = Some(rejection);
-                if lambda == self.options.max_damping {
+                if undamped_trial || lambda == self.options.max_damping {
                     break;
                 }
                 lambda = (lambda * growth).min(self.options.max_damping);
