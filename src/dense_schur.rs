@@ -1,18 +1,15 @@
 //! Direct Schur elimination for bounded retained systems and independent landmarks.
 use std::ops::Range;
 
+#[cfg(not(target_arch = "aarch64"))]
+use faer::linalg::matmul::triangular::{self, BlockStructure};
 use faer::{
     Accum, MatMut, MatRef, Par,
     dyn_stack::{MemBuffer, MemStack},
-    linalg::{
-        cholesky::llt,
-        matmul::{
-            matmul,
-            triangular::{self, BlockStructure},
-        },
-        triangular_solve,
-    },
+    linalg::{cholesky::llt, matmul::matmul, triangular_solve},
 };
+#[cfg(target_arch = "aarch64")]
+use faer::{Conj, linalg::matmul::dot::inner_prod};
 use faer_ext::nalgebra::{DMatrixView, Dim, Dyn, VectorView};
 
 use crate::{
@@ -182,8 +179,19 @@ impl<R: Real> DenseSchur<R> {
             }
             self.reduced[(col, col)] += lambda;
         }
-        // One product over all local solves lets faer's dense kernels amortize
-        // dispatch across small, heterogeneous landmarks.
+        // faer's AArch64 GEMM allocates packing buffers/status vectors per product.
+        #[cfg(target_arch = "aarch64")]
+        for col in 0..r {
+            for row in col..r {
+                self.reduced[(row, col)] -= inner_prod(
+                    self.cross.as_ref().col(row).transpose(),
+                    Conj::No,
+                    self.solved.as_ref().col(col),
+                    Conj::No,
+                );
+            }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
         triangular::matmul(
             self.reduced.as_mut(),
             BlockStructure::TriangularLower,

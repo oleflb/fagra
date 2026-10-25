@@ -9,35 +9,8 @@ use example::{Difference, Prior, Scalar, States};
 
 fagra::factors! { Factors { priors: Prior<f64>, edges: Difference<f64> } }
 
-// Same thread-local allocator instrumentation as marginalization_allocations.rs.
-struct Counter;
-thread_local! { static ALLOCATIONS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
-fn record_allocation() {
-    let _ = ALLOCATIONS.try_with(|count| {
-        if let Some(n) = count.get() {
-            count.set(Some(n + 1));
-        }
-    });
-}
-unsafe impl std::alloc::GlobalAlloc for Counter {
-    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-        record_allocation();
-        unsafe { std::alloc::GlobalAlloc::alloc(&std::alloc::System, layout) }
-    }
-    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
-        record_allocation();
-        unsafe { std::alloc::GlobalAlloc::alloc_zeroed(&std::alloc::System, layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
-        record_allocation();
-        unsafe { std::alloc::GlobalAlloc::realloc(&std::alloc::System, ptr, layout, size) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
-        unsafe { std::alloc::GlobalAlloc::dealloc(&std::alloc::System, ptr, layout) }
-    }
-}
-#[global_allocator]
-static ALLOCATOR: Counter = Counter;
+#[path = "support/allocations.rs"]
+mod allocations;
 
 fn workload<B: fagra::__private::CovarianceBackend<Scalar = f64>>(
     backend: B,
@@ -84,16 +57,14 @@ fn workload<B: fagra::__private::CovarianceBackend<Scalar = f64>>(
     for step in 0..samples + 5 {
         // Force real accepted steps, not a converged zero-gradient timing probe.
         graph.set(keys[0], Scalar(-1.)).unwrap();
-        ALLOCATIONS.with(|count| count.set(Some(0)));
-        let start = std::time::Instant::now();
-        let result = method.solve_batch_with_covariance(
-            &mut graph,
-            &OptimizeOptions::default(),
-            &selected,
-            &CovarianceOptions::default(),
-        );
-        let elapsed = start.elapsed().as_nanos();
-        let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+        let (result, allocations, elapsed) = allocations::measured(|| {
+            method.solve_batch_with_covariance(
+                &mut graph,
+                &OptimizeOptions::default(),
+                &selected,
+                &CovarianceOptions::default(),
+            )
+        });
         let (report, covariance) = result.unwrap();
         assert!(report.iterations > 0);
         assert!(covariance[(0, 0)] > 0.);
@@ -114,6 +85,11 @@ fn workload<B: fagra::__private::CovarianceBackend<Scalar = f64>>(
 fn warmed_solves_with_retained_covariance_allocate_nothing() {
     let (_, _, allocations) = workload(DenseSchur::new(4, [1; 16]), 4, 16, 3);
     assert_eq!(allocations, 0);
+    #[cfg(target_arch = "aarch64")]
+    {
+        let (_, _, allocations) = workload(DenseSchur::new(48, [1; 192]), 48, 192, 3);
+        assert_eq!(allocations, 0);
+    }
 }
 
 #[test]

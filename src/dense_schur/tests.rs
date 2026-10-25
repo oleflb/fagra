@@ -2,6 +2,8 @@ use super::*;
 use crate::{DenseNormalCholesky, Variable};
 use faer_ext::nalgebra::{DMatrix, DVector, DVectorView};
 
+mod sizes;
+
 #[test]
 fn mixed_blocks_and_coupled_retained_system_match_dense_damping_retries() {
     fn check<R: Real + Into<f64>>(tolerance: f64) {
