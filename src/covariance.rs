@@ -85,7 +85,6 @@ impl<R: Real> SelectedCovariance<R> {
             .and_then(|n| n.checked_mul(size_of::<R>()))
             .filter(|&bytes| bytes <= isize::MAX as usize)
             .ok_or(SolverError::InvalidInformation)?;
-        self.rhs.resize(layout.dimension, k);
         self.result.resize_with(k, k, |_, _| R::zero());
         Ok(())
     }
@@ -95,9 +94,27 @@ impl<R: Real> SelectedCovariance<R> {
         normal: &mut DenseNormalCholesky<R>,
     ) -> Result<(), SolverError> {
         let lower = normal.information_factor(self.options.relative_pivot_tolerance)?;
+        self.compute_factor(lower, &[])
+    }
+
+    pub(crate) fn retained_only(&self, dimension: usize) -> Result<(), SolverError> {
+        if self.columns.iter().any(|&column| column >= dimension) {
+            return Err(crate::EvaluationError::UnsupportedStructure.into());
+        }
+        Ok(())
+    }
+
+    // An empty scale slice denotes original coordinates. Otherwise H = D Hs D.
+    pub(crate) fn compute_factor(
+        &mut self,
+        lower: MatRef<'_, R>,
+        scales: &[R],
+    ) -> Result<(), SolverError> {
+        self.retained_only(lower.nrows())?;
+        self.rhs.resize(lower.nrows(), self.columns.len());
         self.rhs.as_mut().fill(R::zero());
         for (j, &i) in self.columns.iter().enumerate() {
-            self.rhs[(i, j)] = R::one();
+            self.rhs[(i, j)] = scales.get(i).copied().unwrap_or(R::one()).recip();
         }
         if !self.columns.is_empty() {
             triangular_solve::solve_lower_triangular_in_place(lower, self.rhs.as_mut(), Par::Seq);

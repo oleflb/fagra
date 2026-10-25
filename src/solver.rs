@@ -229,6 +229,8 @@ where
     /// convergence already has a current model, so extraction does not reevaluate
     /// factors. LSMR/Schur assemble dense information from cached original-coordinate
     /// Jacobians once; this does not reuse a damped solve or preconditioner.
+    /// DenseSchur instead supports retained selections only and factors the undamped
+    /// reduced system, without reconstructing full landmark information.
     ///
     /// The covariance uses the dense storage/cost and borrowed-result contract of
     /// [`Self::joint_covariance`]. Selection and options are checked before optimization.

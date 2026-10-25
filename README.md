@@ -258,7 +258,7 @@ let (report, covariance) = solver.optimize_with_covariance(
 )?;
 ```
 
-Both GN and LM support dense Cholesky, dense QR, LSMR, and Schur.
+Both GN and LM support dense Cholesky, dense QR, LSMR, Schur, and DenseSchur.
 Successful LM convergence already has current Jacobians; extraction does not
 evaluate factors again. GN refreshes after cost-based termination if necessary.
 Covariance failure preserves accepted estimates. The standalone query always
@@ -276,6 +276,10 @@ dense information from their cached, unscaled Jacobians once at extraction time.
 This implementation uses **O(n²) storage and O(n³) factorization**, even for small
 selections; selected extraction costs O(n² k + n k²). It is intended for bounded
 windows, not as a sparse covariance backend for arbitrarily large graphs.
+
+Exception: [`DenseSchur`](docs/dense-schur.md) extracts **retained-only** covariance
+from its reduced system without full landmark information or a full-coordinate RHS.
+The standalone `joint_covariance[_with]` query remains dense, regardless of optimizer.
 
 `joint_covariance_with(&blocks, &options)` accepts explicit rank controls. The
 default rejects normalized squared Cholesky pivots at or below `64 * epsilon`.

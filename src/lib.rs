@@ -39,6 +39,8 @@
 //! Select [`Lsmr`] with `GaussNewton::new(Lsmr::default())` for an iterative solve
 //! using cached local Jacobians without assembling a global matrix.
 //! Select [`DenseQr`] for a direct Jacobian-based solve without normal equations.
+//! Select [`DenseSchur`] for a bounded, generally coupled retained system with
+//! independent heterogeneous landmarks and reduced retained covariance.
 //! All backends support both Gauss–Newton and Levenberg–Marquardt.
 //! [`LevenbergMarquardt`] defaults to LSMR with implicit scaled damping. It rejects
 //! uphill or invalid trials, reusing the same linearization across bounded retries.
@@ -70,6 +72,7 @@ extern crate self as fagra;
 
 mod covariance;
 mod dense;
+mod dense_schur;
 mod error;
 mod factors;
 mod key;
@@ -92,6 +95,7 @@ mod variable;
 pub mod testing;
 
 pub use covariance::CovarianceOptions;
+pub use dense_schur::DenseSchur;
 pub use error::{EvaluationError, KeyError, SolverError};
 pub use factors::{Factor, FactorBatch, FactorSelection};
 pub use key::{BatchKey, BlockId, FactorId, FactorKey, StateKey};
