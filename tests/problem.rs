@@ -30,6 +30,13 @@ fn batch_solvers_share_a_problem_and_tracking_records_only_successful_edits() {
     );
     let foreign = Problem::<States<f64>, Factors<f64>>::new().add(Scalar(0.));
     let before = tracked.changes().to_vec();
+    assert_eq!(
+        tracked
+            .with_factor(prior, |factor, _| factor.measurement)
+            .unwrap(),
+        3.
+    );
+    assert_eq!(tracked.changes(), before);
     assert!(tracked.set(foreign, Scalar(1.)).is_err());
     assert!(
         tracked
@@ -137,6 +144,13 @@ fn tracked_batch_payloads_have_independent_identities() {
         )
         .unwrap();
     let before = problem.changes().to_vec();
+    assert_eq!(
+        problem
+            .with_batch_factor(key, |_, factor, _| factor.measurement)
+            .unwrap(),
+        3.
+    );
+    assert_eq!(problem.changes(), before);
     assert_eq!(
         before.last(),
         Some(&ProblemChange::FactorAdded(key.factor_id()))

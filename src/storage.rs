@@ -217,6 +217,11 @@ impl<T> FactorPool<T> {
             .map(|(key, value)| (FactorId(key), value))
     }
 
+    /// Borrow a factor after validating its key.
+    pub fn get(&self, key: FactorKey<T>) -> Result<&T, KeyError> {
+        self.entries.get(key.raw)
+    }
+
     /// Validate a handle and evaluate the ordinary factor's nonlinear cost.
     ///
     /// Nonfinite or negative objective contributions are rejected.
@@ -225,7 +230,7 @@ impl<T> FactorPool<T> {
         T: Factor<S>,
         T::Scalar: Real,
     {
-        checked_cost(self.entries.get(key.raw)?.cost(states))
+        checked_cost(self.get(key)?.cost(states))
     }
 
     /// Remove one factor, rejecting invalid keys and preserving sibling handles.
@@ -403,6 +408,13 @@ impl<B, P> BatchPool<B, P> {
                 FactorSelection::contiguous(self.locations.id, &batch.keys, &batch.values),
             )
         })
+    }
+
+    /// Borrow a payload and its owning model after validating the payload key.
+    pub fn get(&self, key: FactorKey<P>) -> Result<(&B, &P), KeyError> {
+        let location = self.locations.get(key.raw)?;
+        let batch = self.batches.at_slot(location.batch_slot);
+        Ok((&batch.model, &batch.values[location.dense_index as usize]))
     }
 
     /// Locate the payload's batch and evaluate just that factor through its model.

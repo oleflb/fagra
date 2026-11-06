@@ -53,6 +53,10 @@
 //! [`FactorKey`]. See [factor scopes](LinearizationSink#factor-scopes) for the
 //! difference between ordinary and batched emission.
 //!
+//! Inspect stored factors and current states with [`Problem::with_factor`]. For
+//! batch payloads, [`Problem::with_batch_factor`] also supplies the owning model.
+//! Both borrow storage directly without cloning or allocating.
+//!
 //! # Evaluation contract
 //! A factor owns an independent contribution to the objective. A batch shares
 //! computation across selected factors without merging their graph identities.
@@ -125,7 +129,7 @@ pub mod __private {
     pub use crate::covariance::{
         CovarianceBackend, CovarianceOptimizer, CovarianceWorkspace, SelectedCovariance,
     };
-    pub use crate::factors::{FactorSchema, FactorStore, FactorVisitor};
+    pub use crate::factors::{BatchFactorStore, FactorSchema, FactorStore, FactorVisitor};
     pub use crate::marginalization::Priors;
     pub use crate::optimization::{DampedStep, LeastSquaresBackend, Optimizer};
     pub use crate::states::{StateSchema, StateVisitor};

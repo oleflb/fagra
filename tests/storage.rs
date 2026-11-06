@@ -82,6 +82,133 @@ fagra::factors! {
 type Graph = Solver<scalar::States<f64>, Factors>;
 
 #[test]
+fn factor_inspection_borrows_current_states_in_both_precisions() {
+    fn check<R: fagra::Real>() {
+        let mut graph = Solver::<scalar::States<R>, scalar::Factors<R>>::new();
+        let variable = graph.add(Scalar(R::zero()));
+        let key = graph
+            .add_factor(Prior {
+                variable,
+                measurement: R::one(),
+            })
+            .unwrap();
+        graph.set(variable, Scalar(R::one())).unwrap();
+        let (factor, state) = graph
+            .with_factor(key, |factor, states| {
+                (factor, states.get(factor.variable).unwrap())
+            })
+            .unwrap();
+        assert_eq!(factor.measurement, R::one());
+        assert!(std::ptr::eq(state, graph.get(variable).unwrap()));
+        assert_eq!(state.0, R::one());
+        let result = graph.with_factor(key, |_, _| Err::<(), _>("diagnostic error"));
+        assert_eq!(result.unwrap(), Err("diagnostic error"));
+        graph.remove_factor(key).unwrap();
+        graph
+            .add_factor(Prior {
+                variable,
+                measurement: R::zero(),
+            })
+            .unwrap();
+        assert!(matches!(
+            graph.with_factor(key, |_, _| panic!("stale key")),
+            Err(KeyError::Stale)
+        ));
+        let foreign = Solver::<scalar::States<R>, scalar::Factors<R>>::new();
+        assert!(matches!(
+            foreign.with_factor(key, |_, _| panic!("foreign key")),
+            Err(KeyError::ForeignSolver)
+        ));
+    }
+    check::<f32>();
+    check::<f64>();
+}
+
+#[test]
+fn batch_inspection_resolves_models_after_compaction() {
+    let mut graph = Graph::new();
+    let variable = graph.add(Scalar(3.0));
+    let shared_a = graph.add(Scalar(1.0));
+    let shared_b = graph.add(Scalar(2.0));
+    let a = graph.add_batch(Model { shared: shared_a });
+    let b = graph.add_batch(Model { shared: shared_b });
+    let a0 = graph
+        .add_factor_to(
+            a,
+            Observation {
+                variable,
+                offset: 1.0,
+            },
+        )
+        .unwrap();
+    let b0 = graph
+        .add_factor_to(
+            b,
+            Observation {
+                variable,
+                offset: 2.0,
+            },
+        )
+        .unwrap();
+    let b1 = graph
+        .add_factor_to(
+            b,
+            Observation {
+                variable,
+                offset: 3.0,
+            },
+        )
+        .unwrap();
+    for (key, shared) in [(a0, shared_a), (b0, shared_b)] {
+        graph
+            .with_batch_factor(key, |model, _, _| assert_eq!(model.shared, shared))
+            .unwrap();
+    }
+    graph.remove_factor(a0).unwrap();
+    graph.remove_batch(a).unwrap();
+    graph.remove_factor(b0).unwrap();
+    graph
+        .add_factor_to(
+            b,
+            Observation {
+                variable,
+                offset: 4.0,
+            },
+        )
+        .unwrap();
+    graph.set(shared_b, Scalar(5.0)).unwrap();
+    let (model, payload, state) = graph
+        .with_batch_factor(b1, |model, factor, states| {
+            (model, factor, states.get(model.shared).unwrap())
+        })
+        .unwrap();
+    assert_eq!(model.shared, shared_b);
+    assert_eq!(payload.offset, 3.0);
+    assert_eq!(state.0, 5.0);
+    assert!(std::ptr::eq(
+        payload,
+        graph.with_factor(b1, |factor, _| factor).unwrap()
+    ));
+    assert!(matches!(
+        graph.with_batch_factor(b0, |_, _, _| panic!("stale key")),
+        Err(KeyError::Stale)
+    ));
+    assert!(matches!(
+        graph.with_factor(b0, |_, _| panic!("stale key")),
+        Err(KeyError::Stale)
+    ));
+    let foreign = Graph::new();
+    assert!(matches!(
+        foreign.with_batch_factor(b1, |_, _, _| panic!("foreign key")),
+        Err(KeyError::ForeignSolver)
+    ));
+    assert!(matches!(
+        foreign.with_factor(b1, |_, _| panic!("foreign key")),
+        Err(KeyError::ForeignSolver)
+    ));
+}
+
+#[test]
 fn state_keys_survive_growth_and_jacobians_borrow_real_storage() {
     let mut graph = Graph::default();
     let key = graph.add(Scalar(7.0));

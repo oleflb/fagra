@@ -1,7 +1,7 @@
 use crate::{
     BatchKey, BlockId, DenseNormalCholesky, Factor, FactorBatch, FactorKey, GaussNewton, KeyError,
     OptimizeOptions, OptimizeReport, Real, SolverError, StateKey, StateStore, Variable,
-    factors::{FactorSchema, FactorStore},
+    factors::{BatchFactorStore, FactorSchema, FactorStore},
     marginalization::{MarginalizationOptions, MarginalizationReport, Marginalizer, Priors},
     optimization::Optimizer,
     states::{StateSchema, StateVisitor},
@@ -131,6 +131,44 @@ where
         model.visit_variables(&factor, |id| dependencies.check(id));
         dependencies.result?;
         Ok(self.factors.pool_mut().insert_into(batch, factor)?)
+    }
+
+    /// Inspect an ordinary factor or batch payload together with current states.
+    ///
+    /// Borrows storage directly without cloning or allocating. Removed, unknown,
+    /// or foreign keys return an error without invoking `inspect`. The callback
+    /// may return references borrowing the graph; these prevent graph mutation
+    /// until released. Callback errors are returned inside the outer `Result`.
+    /// Shared references do not prevent user-defined interior mutation.
+    pub fn with_factor<'a, T: 'a, R>(
+        &'a self,
+        key: FactorKey<T>,
+        inspect: impl FnOnce(&'a T, &'a S) -> R,
+    ) -> Result<R, KeyError>
+    where
+        F: FactorStore<S, T, Scalar = S::Scalar>,
+    {
+        Ok(inspect(self.factors.get_factor(key)?, &self.states))
+    }
+
+    /// Inspect a batch payload, its owning shared model, and current states.
+    ///
+    /// The payload key determines the model; no batch key is needed. Like
+    /// [`Self::with_factor`], this borrows storage without cloning or allocating,
+    /// rejects invalid keys before calling `inspect`, and allows borrowed results.
+    /// Callback errors remain inside the outer `Result`. References are shared;
+    /// user-defined interior mutation is still possible.
+    pub fn with_batch_factor<'a, T: 'a, R>(
+        &'a self,
+        key: FactorKey<T>,
+        inspect: impl FnOnce(&'a F::Model, &'a T, &'a S) -> R,
+    ) -> Result<R, KeyError>
+    where
+        F: BatchFactorStore<S, T, Scalar = S::Scalar>,
+        F::Model: 'a,
+    {
+        let (model, factor) = self.factors.get_batch_factor(key)?;
+        Ok(inspect(model, factor, &self.states))
     }
 
     /// Evaluate one ordinary or batched factor's nonlinear cost without Jacobians.

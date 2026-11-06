@@ -188,6 +188,9 @@ pub trait FactorStore<S, P> {
     /// Scalar returned by the registered evaluator.
     type Scalar: Real;
 
+    /// Borrow the ordinary factor or batch payload after validating its key.
+    fn get_factor(&self, key: FactorKey<P>) -> Result<&P, KeyError>;
+
     /// Validate the key and evaluate one factor's nonlinear cost against `states`.
     fn factor_cost(&self, states: &S, key: FactorKey<P>) -> Result<Self::Scalar, SolverError>;
 
@@ -196,6 +199,17 @@ pub trait FactorStore<S, P> {
     /// Invalid keys are rejected. Graph connectivity and cache updates remain
     /// the solver's responsibility, outside this storage operation.
     fn remove_factor(&mut self, key: FactorKey<P>) -> Result<(), KeyError>;
+}
+
+/// Route batch payload handles to their owning model and payload.
+///
+/// Internal macro plumbing generated only for registered batch families.
+pub trait BatchFactorStore<S, P>: FactorStore<S, P> {
+    /// Shared evaluator belonging to this payload family.
+    type Model: FactorBatch<S, Scalar = Self::Scalar, Factor = P>;
+
+    /// Borrow the owning model and payload after validating the payload key.
+    fn get_batch_factor(&self, key: FactorKey<P>) -> Result<(&Self::Model, &P), KeyError>;
 }
 
 /// Static traversal of the factor families declared by [`factors!`](crate::factors!).
@@ -341,6 +355,12 @@ macro_rules! factors {
         {
             type Scalar = $real;
 
+            fn get_factor(
+                &self, key: $crate::FactorKey<$factor>,
+            ) -> ::core::result::Result<&$factor, $crate::KeyError> {
+                self.$field.get(key).map(|(_, factor)| factor)
+            }
+
             fn factor_cost(
                 &self, states: &__S, key: $crate::FactorKey<$factor>,
             ) -> ::core::result::Result<$real, $crate::SolverError> {
@@ -351,6 +371,18 @@ macro_rules! factors {
                 &mut self, key: $crate::FactorKey<$factor>,
             ) -> ::core::result::Result<(), $crate::KeyError> {
                 self.$field.remove_factor(key)
+            }
+        }
+
+        impl<__S $(, $scalar: $crate::Real)?> $crate::__private::BatchFactorStore<__S, $factor> for $name$(<$scalar>)?
+        where $model: $crate::FactorBatch<__S, Scalar = $real, Factor = $factor>,
+        {
+            type Model = $model;
+
+            fn get_batch_factor(
+                &self, key: $crate::FactorKey<$factor>,
+            ) -> ::core::result::Result<(&Self::Model, &$factor), $crate::KeyError> {
+                self.$field.get(key)
             }
         }
 
@@ -370,6 +402,12 @@ macro_rules! factors {
         where $factor: $crate::Factor<__S, Scalar = $real>,
         {
             type Scalar = $real;
+
+            fn get_factor(
+                &self, key: $crate::FactorKey<$factor>,
+            ) -> ::core::result::Result<&$factor, $crate::KeyError> {
+                self.$field.get(key)
+            }
 
             fn factor_cost(
                 &self, states: &__S, key: $crate::FactorKey<$factor>,
