@@ -108,8 +108,8 @@ pub use lsmr::{Lsmr, LsmrDiagnostics, LsmrStatistics, LsmrTermination, LsmrTimin
 pub use marginalization::{MarginalizationOptions, MarginalizationReport};
 pub use normal::DenseNormalCholesky;
 pub use optimization::{
-    GaussNewton, LevenbergMarquardt, LmOptions, LmStatistics, OptimizeOptions, OptimizeReport,
-    TerminationReason, TrialFailure,
+    GaussNewton, LevenbergMarquardt, LinearSolveWork, LmOptions, LmOutcome, LmStatistics, LmWork,
+    OptimizeOptions, OptimizeReport, TerminationReason, TrialFailure,
 };
 pub use qr::DenseQr;
 pub use real::Real;

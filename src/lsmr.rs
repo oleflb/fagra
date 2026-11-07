@@ -474,6 +474,13 @@ impl<R: Real> Lsmr<R> {
 impl<R: Real> LeastSquaresBackend for Lsmr<R> {
     type Scalar = R;
 
+    fn linear_solve_work(&self) -> Option<crate::LinearSolveWork> {
+        Some(crate::LinearSolveWork {
+            solves: self.statistics.solves,
+            iterations: self.statistics.iterations,
+        })
+    }
+
     fn prepare(&mut self, dimension: usize) -> Result<(), SolverError> {
         self.statistics = LsmrStatistics::default();
         *self.timings.get_mut().unwrap() = LsmrTimings::default();

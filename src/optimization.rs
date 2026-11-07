@@ -17,7 +17,18 @@ mod gauss_newton;
 mod levenberg_marquardt;
 
 pub use gauss_newton::GaussNewton;
-pub use levenberg_marquardt::{LevenbergMarquardt, LmOptions, LmStatistics, TrialFailure};
+pub use levenberg_marquardt::{
+    LevenbergMarquardt, LmOptions, LmOutcome, LmStatistics, LmWork, TrialFailure,
+};
+
+/// Linear solver work, excluding model preparation and final observations.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LinearSolveWork {
+    /// Backend solve attempts, including failures.
+    pub solves: usize,
+    /// Completed inner iterations, including failed solves.
+    pub iterations: usize,
+}
 
 /// Stopping controls shared by nonlinear optimizers.
 ///
@@ -120,6 +131,12 @@ pub trait Optimizer<S: StateSchema, F> {
 pub trait LeastSquaresBackend {
     /// Scalar shared by the model, gradient, and step buffers.
     type Scalar: Real;
+
+    /// Work since the last `prepare`, including failed solves. None means unavailable.
+    /// Implementations reporting work must reset these counters during `prepare`.
+    fn linear_solve_work(&self) -> Option<LinearSolveWork> {
+        None
+    }
 
     /// Prepare reusable storage for this number of scalar coordinates.
     fn prepare(&mut self, dimension: usize) -> Result<(), SolverError>;

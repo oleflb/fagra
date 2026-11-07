@@ -19,6 +19,9 @@ use scalar::Scalar;
 #[path = "levenberg_marquardt/stagnation.rs"]
 mod stagnation;
 
+#[path = "levenberg_marquardt/outcome.rs"]
+mod outcome;
+
 struct Counter;
 thread_local! { static ALLOCATIONS: Cell<Option<usize>> = const { Cell::new(None) }; }
 fn record() {

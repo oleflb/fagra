@@ -35,6 +35,15 @@ on the problem, retaining their buffers across calls. The existing `Solver` grap
 API remains available as a compatibility wrapper with a default GN optimizer.
 See [examples/scalar_prior.rs](examples/scalar_prior.rs) for a runnable example.
 
+LM also offers `solve_batch_with_outcome`, returning an `LmOutcome` with `result`,
+`statistics`, and `work` even on failure. Accumulate `total += outcome.work` into
+`LmWork::default()` across application retries. Only work is summed; inspect the
+latest outcome's statistics for cost, damping, and the last linearized gradient
+(which need not describe the returned estimates). Backend work includes LSMR or
+Schur CG iterations; `None` means unavailable, not zero. Early failures contain
+no stale work from an earlier solve. Capturing an outcome adds no evaluations,
+allocations, or clock reads.
+
 ### Opt-in change tracking
 
 `TrackedProblem::new(problem)` owns a problem and records successful state/factor

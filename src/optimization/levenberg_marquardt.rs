@@ -96,7 +96,8 @@ pub struct LmStatistics<R: Real = f64> {
     pub damping: R,
     /// Latest accepted total objective, including constant marginalization cost.
     pub cost: Option<R>,
-    /// Gradient infinity norm at the last linearization (may precede a final error).
+    /// Gradient infinity norm at the last linearization, not necessarily at the
+    /// returned estimates: a later step may be accepted before a final error.
     pub gradient_norm: Option<R>,
     /// Infinity norm of the last successfully solved step, accepted or rejected.
     pub step_norm: Option<R>,
@@ -118,6 +119,68 @@ impl<R: Real> Default for LmStatistics<R> {
             last_rejection: None,
         }
     }
+}
+
+/// Additive work counters for one or more LM calls, including failed calls.
+/// Cost, gradient, damping and other observations remain in [`LmStatistics`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LmWork {
+    /// Attempted accepted-state linearizations, including convergence checks.
+    pub linearizations: usize,
+    /// Linear solve attempts, including rejected and failed solves.
+    pub attempts: usize,
+    /// Rejected nonlinear attempts.
+    pub rejected_steps: usize,
+    /// Committed nonlinear steps.
+    pub accepted_steps: usize,
+    /// Cost evaluations, including invalid evaluations.
+    pub cost_evaluations: usize,
+    /// Backend solve work, or None if any contributing call cannot report it.
+    /// Counts LSMR iterations or Schur reduced-system CG iterations, respectively.
+    pub linear_solve: Option<super::LinearSolveWork>,
+}
+
+impl Default for LmWork {
+    fn default() -> Self {
+        Self {
+            linearizations: 0,
+            attempts: 0,
+            rejected_steps: 0,
+            accepted_steps: 0,
+            cost_evaluations: 0,
+            linear_solve: Some(super::LinearSolveWork::default()),
+        }
+    }
+}
+
+impl std::ops::AddAssign for LmWork {
+    /// Accumulate work across application retries; observations are never summed.
+    /// Counters saturate at `usize::MAX` instead of wrapping or panicking.
+    fn add_assign(&mut self, other: Self) {
+        self.linearizations = self.linearizations.saturating_add(other.linearizations);
+        self.attempts = self.attempts.saturating_add(other.attempts);
+        self.rejected_steps = self.rejected_steps.saturating_add(other.rejected_steps);
+        self.accepted_steps = self.accepted_steps.saturating_add(other.accepted_steps);
+        self.cost_evaluations = self.cost_evaluations.saturating_add(other.cost_evaluations);
+        self.linear_solve =
+            self.linear_solve
+                .zip(other.linear_solve)
+                .map(|(a, b)| super::LinearSolveWork {
+                    solves: a.solves.saturating_add(b.solves),
+                    iterations: a.iterations.saturating_add(b.iterations),
+                });
+    }
+}
+
+/// Owned result and diagnostics from exactly one LM call, including failures.
+#[derive(Debug)]
+pub struct LmOutcome<R: Real = f64> {
+    /// Same result as [`LevenbergMarquardt::solve_batch`].
+    pub result: Result<OptimizeReport<R>, SolverError>,
+    /// This call's statistics; observations are not necessarily final-state values.
+    pub statistics: LmStatistics<R>,
+    /// Add to an [`LmWork`] total to account for application-level retries.
+    pub work: LmWork,
 }
 
 /// Levenberg–Marquardt with scaled diagonal damping and gain-ratio acceptance.
@@ -178,6 +241,42 @@ impl<B: LeastSquaresBackend> LevenbergMarquardt<B> {
         F: FactorSchema<S, Scalar = S::Scalar>,
     {
         problem.run_batch(self, options)
+    }
+
+    /// Solve and capture this call's diagnostics even when it fails.
+    /// No extra model evaluations, allocations or clock reads are performed.
+    /// Accumulate `outcome.work` across retries; use the latest `statistics`
+    /// for observations such as cost, last linearized gradient and damping.
+    pub fn solve_batch_with_outcome<S, F>(
+        &mut self,
+        problem: &mut impl crate::BatchProblem<S, F>,
+        options: &OptimizeOptions<S::Scalar>,
+    ) -> LmOutcome<S::Scalar>
+    where
+        S: StateSchema<Scalar = B::Scalar>,
+        F: FactorSchema<S, Scalar = S::Scalar>,
+    {
+        // A BatchProblem can fail before invoking the optimizer.
+        self.statistics = LmStatistics::default();
+        let result = self.solve_batch(problem, options);
+        let statistics = self.statistics;
+        let linear_solve = if statistics.attempts == 0 {
+            Some(super::LinearSolveWork::default())
+        } else {
+            self.work.backend.linear_solve_work()
+        };
+        LmOutcome {
+            result,
+            statistics,
+            work: LmWork {
+                linearizations: statistics.linearizations,
+                attempts: statistics.attempts,
+                rejected_steps: statistics.rejected_steps,
+                accepted_steps: statistics.accepted_steps,
+                cost_evaluations: statistics.cost_evaluations,
+                linear_solve,
+            },
+        }
     }
 
     /// Construct an optimizer retaining the supplied backend and default controls.

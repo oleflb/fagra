@@ -399,6 +399,13 @@ impl<R: Real> Schur<R> {
 
 impl<R: Real> LeastSquaresBackend for Schur<R> {
     type Scalar = R;
+
+    fn linear_solve_work(&self) -> Option<crate::LinearSolveWork> {
+        Some(crate::LinearSolveWork {
+            solves: self.statistics.solves,
+            iterations: self.statistics.iterations,
+        })
+    }
     fn prepare(&mut self, dimension: usize) -> Result<(), SolverError> {
         self.ready = false;
         self.statistics = SchurStatistics::default();
