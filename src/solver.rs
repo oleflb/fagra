@@ -19,6 +19,7 @@ use crate::{
 /// Nonlinear solvers operate on this graph through their `solve_batch` methods.
 /// Bulk square-root marginalization replaces incident factors with internal priors.
 pub struct Problem<S: StateSchema, F> {
+    checkpoint_owner: std::sync::OnceLock<crate::states::CheckpointIdentity>,
     states: S,
     factors: F,
     priors: Priors<S::Scalar>,
@@ -34,6 +35,7 @@ where
     /// Create an empty graph with the declared storage families.
     pub fn new() -> Self {
         Self {
+            checkpoint_owner: std::sync::OnceLock::new(),
             states: S::default(),
             factors: F::default(),
             priors: Priors::default(),
@@ -72,6 +74,40 @@ where
         S: PoolAccess<StatePool<T>>,
     {
         self.states.pool_mut().set(key, value)
+    }
+
+    /// Capture exact accepted state values and identities using their `Clone` implementations.
+    ///
+    /// Requires all variables in the [`states!`](crate::states!) schema to implement
+    /// `Clone`. Factors, historical priors, anchors, and numerical workspaces are not captured.
+    pub fn checkpoint_states(&self) -> crate::StateCheckpoint<S>
+    where
+        S: crate::SnapshotStates,
+    {
+        crate::StateCheckpoint {
+            owner: *self.checkpoint_owner.get_or_init(Default::default),
+            values: self.states.snapshot(),
+        }
+    }
+
+    /// Restore state values, consuming the checkpoint even on rejection.
+    ///
+    /// All families are validated before any value changes. Foreign graphs and
+    /// changed live state identities are rejected, including removed/reused slots.
+    /// Factor edits are allowed; factors, priors, anchors, and workspaces stay intact.
+    pub fn restore_states(
+        &mut self,
+        checkpoint: crate::StateCheckpoint<S>,
+    ) -> Result<(), crate::StateCheckpointError>
+    where
+        S: crate::SnapshotStates,
+    {
+        if self.checkpoint_owner.get() != Some(&checkpoint.owner) {
+            return Err(crate::StateCheckpointError::ForeignGraph);
+        }
+        self.states.validate_snapshot(&checkpoint.values)?;
+        self.states.restore_snapshot(checkpoint.values);
+        Ok(())
     }
 
     /// Insert an ordinary factor after validating its variable dependencies.

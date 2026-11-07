@@ -115,7 +115,7 @@ pub use qr::DenseQr;
 pub use real::Real;
 pub use schur::{Schur, SchurDiagnostics, SchurStatistics, SchurTermination, SchurTimings};
 pub use solver::{Problem, Solver};
-pub use states::StateStore;
+pub use states::{SnapshotStates, StateCheckpoint, StateCheckpointError, StateStore};
 pub use tracked::{BatchProblem, ProblemChange, TrackedProblem};
 pub use variable::{Jacobian, Tangent, Variable};
 
@@ -132,6 +132,6 @@ pub mod __private {
     pub use crate::factors::{BatchFactorStore, FactorSchema, FactorStore, FactorVisitor};
     pub use crate::marginalization::Priors;
     pub use crate::optimization::{DampedStep, LeastSquaresBackend, Optimizer};
-    pub use crate::states::{StateSchema, StateVisitor};
-    pub use crate::storage::{BatchPool, FactorPool, PoolAccess, StatePool};
+    pub use crate::states::{SnapshotPools, StatePools, StateSchema, StateVisitor};
+    pub use crate::storage::{BatchPool, FactorPool, PoolAccess, StatePool, StatePoolSnapshot};
 }

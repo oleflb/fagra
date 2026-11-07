@@ -54,6 +54,32 @@ on errors or unwinding. Successful nonempty marginalization also requests a rebu
 changes to shared evaluator data. There is no journal-consuming incremental solver
 or Bayes tree yet, so edits remain pending until superseded by a rebuild marker.
 
+### State-only checkpoints
+
+Ordinary `states! { States { poses: Pose, points: Point } }` declarations
+automatically support checkpoints when every listed variable implements `Clone`.
+Schemas containing non-cloneable variables still support ordinary graph operations;
+only checkpoint calls require `Clone`. `Variable` has no `Clone` bound.
+Cloning must preserve the exact value independently of later mutations, including
+any application metadata; values are never reconstructed through group operations.
+
+```rust,ignore
+let checkpoint = problem.checkpoint_states(); // StateCheckpoint<States>
+problem.set(x, candidate)?;
+problem.restore_states(checkpoint)?;
+```
+
+Restore consumes the opaque checkpoint, including on error. It checks graph identity
+and every family's live generational keys before changing any value. Foreign graphs
+(even empty ones) and changed state membership return `StateCheckpointError` without
+partial restoration. State handles remain valid. Factor edits are allowed: factors,
+historical priors, anchors, and numerical workspaces are neither captured nor restored.
+`TrackedProblem` supports the same calls and requests `Rebuild` only after a successful
+restore. Generic callers can require `SnapshotStates`. Schemas retain their ordinary
+storage layout. The problem initializes its ownership identity lazily on the first
+checkpoint, including schemas with no state families; ordinary operations do no
+snapshot copying or identity allocation.
+
 ## Quick start: one scalar and one prior
 
 This model minimizes `0.5 * (x - measurement)²`. Its solution is `x = measurement`.

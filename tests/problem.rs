@@ -6,6 +6,14 @@ use example::{Factors, Prior, Scalar, States};
 use fagra::{GaussNewton, LevenbergMarquardt, Problem, ProblemChange, TrackedProblem};
 
 #[test]
+fn ordinary_nonclone_schemas_still_support_state_edits() {
+    let mut graph = Problem::<States<f32>, Factors<f32>>::new();
+    let key = graph.add(Scalar(1_f32));
+    graph.set(key, Scalar(2.)).unwrap();
+    assert_eq!(graph.get(key).unwrap().0, 2.);
+}
+
+#[test]
 fn batch_solvers_share_a_problem_and_tracking_records_only_successful_edits() {
     let mut problem = Problem::<States<f64>, Factors<f64>>::new();
     let x = problem.add(Scalar(0.));

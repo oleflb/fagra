@@ -67,6 +67,22 @@ impl<S: StateSchema, F: FactorSchema<S, Scalar = S::Scalar>> TrackedProblem<S, F
         self.changes.push(ProblemChange::Rebuild);
     }
 
+    /// Restore state values and invalidate all cached models only on success.
+    ///
+    /// Capture with [`Problem::checkpoint_states`] through this wrapper's shared access.
+    /// Rejected checkpoints leave both states and the pending journal unchanged.
+    pub fn restore_states(
+        &mut self,
+        checkpoint: crate::StateCheckpoint<S>,
+    ) -> Result<(), crate::StateCheckpointError>
+    where
+        S: crate::SnapshotStates,
+    {
+        self.problem.restore_states(checkpoint)?;
+        self.invalidate_all();
+        Ok(())
+    }
+
     /// Insert a variable and record its stable identity.
     pub fn add<T: Variable<Scalar = S::Scalar>>(&mut self, value: T) -> StateKey<T>
     where

@@ -31,6 +31,14 @@ pub struct StatePool<T: Variable> {
     trial_active: bool,
 }
 
+/// Values and live identities of one state family; internal snapshot plumbing.
+#[doc(hidden)]
+pub struct PoolCheckpoint<T> {
+    pool: crate::key::PoolId,
+    keys: Vec<LocalKey>,
+    values: Vec<T>,
+}
+
 impl<T: Variable> Default for StatePool<T> {
     fn default() -> Self {
         Self {
@@ -38,6 +46,51 @@ impl<T: Variable> Default for StatePool<T> {
             anchors: Vec::new(),
             trial: Vec::new(),
             trial_active: false,
+        }
+    }
+}
+
+/// Conditional copying capability for a homogeneous state pool.
+#[doc(hidden)]
+pub trait StatePoolSnapshot {
+    type Snapshot;
+    fn checkpoint(&self) -> Self::Snapshot;
+    fn validate_checkpoint(
+        &self,
+        checkpoint: &Self::Snapshot,
+    ) -> Result<(), crate::StateCheckpointError>;
+    fn restore_checkpoint(&mut self, checkpoint: Self::Snapshot);
+}
+
+impl<T: Variable + Clone> StatePoolSnapshot for StatePool<T> {
+    type Snapshot = PoolCheckpoint<T>;
+
+    fn checkpoint(&self) -> Self::Snapshot {
+        assert!(!self.trial_active);
+        PoolCheckpoint {
+            pool: self.entries.id,
+            keys: self.entries.keys.clone(),
+            values: self.entries.values.clone(),
+        }
+    }
+
+    fn validate_checkpoint(
+        &self,
+        checkpoint: &PoolCheckpoint<T>,
+    ) -> Result<(), crate::StateCheckpointError> {
+        if checkpoint.pool != self.entries.id {
+            return Err(crate::StateCheckpointError::ForeignGraph);
+        }
+        if checkpoint.keys != self.entries.keys {
+            return Err(crate::StateCheckpointError::MembershipChanged);
+        }
+        Ok(())
+    }
+
+    fn restore_checkpoint(&mut self, checkpoint: PoolCheckpoint<T>) {
+        assert!(!self.trial_active);
+        for (value, saved) in self.entries.values.iter_mut().zip(checkpoint.values) {
+            *value = saved;
         }
     }
 }
