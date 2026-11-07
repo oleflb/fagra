@@ -26,6 +26,7 @@ pub struct Problem<S: StateSchema, F> {
     marginalizer: Marginalizer<S::Scalar>,
     covariance: crate::covariance::CovarianceWorkspace<S::Scalar>,
     covariance_blocks: Vec<crate::CovarianceBlock>,
+    checkpoints: Option<Box<crate::checkpoint::Checkpoints>>,
 }
 
 impl<S, F> Problem<S, F>
@@ -43,7 +44,74 @@ where
             marginalizer: Marginalizer::default(),
             covariance: crate::covariance::CovarianceWorkspace::default(),
             covariance_blocks: Vec::new(),
+            checkpoints: None,
         }
+    }
+
+    /// Capture all logical graph contents, including marginal priors and anchors.
+    ///
+    /// All states, factors, batch models and payloads must implement `Clone`, and cloning must
+    /// independently preserve mutable evaluation data (see [`crate::GraphCheckpoint`]).
+    /// Capture allocates and clones only on this explicit path. Numerical workspaces
+    /// and optimizer state are not captured. Dropped checkpoint tokens are pruned here.
+    pub fn checkpoint(&mut self) -> crate::GraphCheckpoint<S, F>
+    where
+        S: crate::SnapshotSchema,
+        F: crate::SnapshotSchema,
+    {
+        let states = self.states.snapshot_graph();
+        let factors = self.factors.snapshot_graph();
+        let priors = self.priors.checkpoint();
+        let owner = *self.checkpoint_owner.get_or_init(Default::default);
+        let registry = self
+            .checkpoints
+            .get_or_insert_with(|| Box::new(crate::checkpoint::Checkpoints::new(owner)));
+        crate::GraphCheckpoint {
+            owner,
+            token: registry.capture(),
+            states,
+            factors,
+            priors,
+        }
+    }
+
+    /// Restore a full graph checkpoint, consuming it even on rejection.
+    ///
+    /// Restores saved handles and invalidates all handles created after capture.
+    /// All younger graph checkpoints are invalidated; older checkpoints remain valid.
+    /// Foreign, invalidated, and generation-exhausted restores reject before mutation.
+    /// Allocation failure or panicking user destructors are not transactional.
+    ///
+    /// Rollback preserves allocator high-water marks and traverses retained slot
+    /// directories. It cannot shrink identity metadata below its historical extent.
+    /// Each rollback reserves a generation above every pool's high-water mark;
+    /// exhausted pools reject even if the highest generation was never issued.
+    /// Ordinary key lookup is unchanged. New-slot insertion loads a pool generation
+    /// floor instead of zero; removal adds one floor load and integer maximum.
+    /// No ordinary operation clones snapshots, traverses history, or locks a registry.
+    pub fn restore(
+        &mut self,
+        checkpoint: crate::GraphCheckpoint<S, F>,
+    ) -> Result<(), crate::GraphCheckpointError>
+    where
+        S: crate::SnapshotSchema,
+        F: crate::SnapshotSchema,
+    {
+        let registry = self
+            .checkpoints
+            .as_mut()
+            .filter(|registry| registry.owner == checkpoint.owner)
+            .ok_or(crate::GraphCheckpointError::ForeignGraph)?;
+        let position = registry.position(&checkpoint.token)?;
+        self.states.preflight_restore()?;
+        self.factors.preflight_restore()?;
+        self.priors.preflight_restore()?;
+
+        self.states.restore_graph(checkpoint.states);
+        self.factors.restore_graph(checkpoint.factors);
+        self.priors.restore(checkpoint.priors);
+        registry.restored(position);
+        Ok(())
     }
 
     /// Insert an application-initialized variable into its registered pool.

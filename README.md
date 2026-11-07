@@ -89,6 +89,34 @@ storage layout. The problem initializes its ownership identity lazily on the fir
 checkpoint, including schemas with no state families; ordinary operations do no
 snapshot copying or identity allocation.
 
+### Full graph checkpoints
+
+Ordinary `states!` and `factors!` declarations automatically support full checkpoints
+when all states, ordinary factors, batch models and payloads implement `Clone`.
+Non-cloneable types remain supported for ordinary graph operations; only checkpoint
+calls require the conditional `SnapshotSchema` capability. Cloning requires independent
+mutable-value semantics. Immutable data may be shared; cloning a shared pointer to
+mutable evaluation data does not isolate a checkpoint.
+
+```rust,ignore
+let checkpoint = problem.checkpoint(); // GraphCheckpoint<States, Factors>
+// Edit states, factors or batches, marginalize, optimize, then validate.
+problem.restore(checkpoint)?;
+```
+
+Full restore includes state membership and values, factors, batch models/payloads,
+marginal priors and anchors. Numerical workspaces and application history are not
+captured. Saved handles regain validity; discarded post-checkpoint handles cannot
+alias future insertions. Restoring consumes the checkpoint and invalidates younger
+full graph checkpoints; older checkpoints remain usable. Foreign, invalidated or
+generation-exhausted checkpoints return `GraphCheckpointError` before mutation.
+`TrackedProblem` records `Rebuild` only after successful restore.
+
+Checkpoint work is explicit. Ordinary key lookup remains unchanged; identity-safe
+rollback adds a generation-floor load on new-slot insertion and a load/maximum on
+removal. Rollback retains allocator high-water marks and may allocate. Use the
+state-only API when structure does not need restoring.
+
 ## Quick start: one scalar and one prior
 
 This model minimizes `0.5 * (x - measurement)²`. Its solution is `x = measurement`.

@@ -68,6 +68,7 @@ pub struct MarginalizationReport {
     pub prior_rows: usize,
 }
 
+#[derive(Clone)]
 pub(crate) struct Anchor<T: Variable> {
     prior: RawKey,
     state: StateKey<T>,
@@ -103,6 +104,11 @@ pub struct Priors<R: Real> {
     pub(crate) constant: R,
 }
 
+pub(crate) struct PriorCheckpoint<R: Real> {
+    entries: crate::dense::DenseSnapshot<Prior<R>>,
+    constant: R,
+}
+
 impl<R: Real> Default for Priors<R> {
     fn default() -> Self {
         Self {
@@ -114,6 +120,40 @@ impl<R: Real> Default for Priors<R> {
 }
 
 impl<R: Real> Priors<R> {
+    pub(crate) fn checkpoint(&self) -> PriorCheckpoint<R> {
+        PriorCheckpoint {
+            entries: self.entries.snapshot_with(|prior| Prior {
+                blocks: prior.blocks.clone(),
+                a: MatrixBuffer {
+                    matrix: prior.a.matrix.clone(),
+                    capacity: (prior.a.nrows(), prior.a.ncols()),
+                },
+                b: prior.b.clone(),
+                // Derived evaluation buffers are reconstructed, not snapshotted.
+                residual: Vec::new(),
+                jacobian: MatrixBuffer::default(),
+            }),
+            constant: self.constant,
+        }
+    }
+
+    pub(crate) fn preflight_restore(&self) -> Result<(), crate::GraphCheckpointError> {
+        crate::checkpoint::floor(&self.entries).map(|_| ())
+    }
+
+    pub(crate) fn restore(&mut self, mut snapshot: PriorCheckpoint<R>) {
+        let floor = self
+            .entries
+            .restore_floor()
+            .expect("preflighted prior pool");
+        for prior in &mut snapshot.entries.values {
+            prior.residual.resize(prior.b.len(), R::zero());
+            prior.jacobian.resize(prior.a.nrows(), prior.a.ncols());
+        }
+        self.entries.restore(snapshot.entries, floor);
+        self.constant = snapshot.constant;
+    }
+
     fn update<S: StateSchema<Scalar = R>>(
         &mut self,
         states: &mut S,

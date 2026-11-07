@@ -18,6 +18,15 @@ pub(crate) struct DensePool<T> {
     pub(crate) keys: Vec<LocalKey>,
     slots: Vec<Slot>,
     free_slots: Vec<u32>,
+    // Rollback advances this above discarded identities without changing key lookup.
+    generation_floor: u32,
+}
+
+/// Logical contents only; allocator history stays with the live pool.
+pub(crate) struct DenseSnapshot<T> {
+    id: PoolId,
+    pub(crate) values: Vec<T>,
+    keys: Vec<LocalKey>,
 }
 
 impl<T> Default for DensePool<T> {
@@ -28,11 +37,55 @@ impl<T> Default for DensePool<T> {
             keys: Vec::new(),
             slots: Vec::new(),
             free_slots: Vec::new(),
+            generation_floor: 0,
         }
     }
 }
 
 impl<T> DensePool<T> {
+    pub(crate) fn snapshot_with(&self, snapshot: impl FnMut(&T) -> T) -> DenseSnapshot<T> {
+        DenseSnapshot {
+            id: self.id,
+            values: self.values.iter().map(snapshot).collect(),
+            keys: self.keys.clone(),
+        }
+    }
+
+    /// Preflight every pool before restoring any of them.
+    pub(crate) fn restore_floor(&self) -> Option<u32> {
+        self.slots
+            .iter()
+            .fold(self.generation_floor, |floor, slot| {
+                floor.max(slot.generation)
+            })
+            .checked_add(1)
+    }
+
+    /// The caller validates ownership and preflights all pools before mutation.
+    pub(crate) fn restore(&mut self, snapshot: DenseSnapshot<T>, floor: u32) {
+        assert_eq!(self.id, snapshot.id, "foreign pool snapshot");
+        debug_assert_eq!(self.restore_floor(), Some(floor));
+        self.generation_floor = floor;
+        for slot in &mut self.slots {
+            slot.generation = floor;
+            slot.dense_index = VACANT;
+        }
+        for (index, key) in snapshot.keys.iter().enumerate() {
+            self.slots[key.slot as usize] = Slot {
+                generation: key.generation,
+                dense_index: index as u32,
+            };
+        }
+        self.free_slots.clear();
+        for (index, slot) in self.slots.iter().enumerate() {
+            if slot.dense_index == VACANT {
+                self.free_slots.push(index as u32);
+            }
+        }
+        self.keys = snapshot.keys;
+        self.values = snapshot.values;
+    }
+
     pub(crate) fn reserve(&mut self, additional: usize) {
         let live = self
             .values
@@ -67,7 +120,7 @@ impl<T> DensePool<T> {
             None => {
                 let slot = self.slots.len() as u32;
                 self.slots.push(Slot {
-                    generation: 0,
+                    generation: self.generation_floor,
                     dense_index,
                 });
                 slot
@@ -129,7 +182,7 @@ impl<T> DensePool<T> {
         let slot = &mut self.slots[key.local.slot as usize];
         slot.dense_index = VACANT;
         if let Some(generation) = slot.generation.checked_add(1) {
-            slot.generation = generation;
+            slot.generation = generation.max(self.generation_floor);
             self.free_slots.push(key.local.slot);
         }
         // Exhausted generations stay vacant forever. Drop the value only after
@@ -268,6 +321,83 @@ mod tests {
         );
         assert_eq!(pool.values.capacity(), capacity);
         assert_eq!(*pool.get(replacement).unwrap(), 20);
+        check(&pool);
+    }
+
+    #[test]
+    fn rollback_restores_old_keys_without_reissuing_discarded_keys() {
+        let mut pool = DensePool::default();
+        let original = pool.insert(10);
+        let older = pool.snapshot_with(|value| *value);
+        pool.remove(original).unwrap();
+        let replacement = pool.insert(20);
+        let newer = pool.snapshot_with(|value| *value);
+        let appended = pool.insert(30);
+        pool.remove(replacement).unwrap();
+        let reused = pool.insert(40);
+
+        pool.restore(newer, pool.restore_floor().unwrap());
+        assert_eq!(*pool.get(replacement).unwrap(), 20);
+        assert!(matches!(pool.get(original), Err(KeyError::Stale)));
+        for discarded in [appended, reused] {
+            assert!(matches!(pool.get(discarded), Err(KeyError::Stale)));
+        }
+        check(&pool);
+
+        pool.restore(older, pool.restore_floor().unwrap());
+        assert_eq!(*pool.get(original).unwrap(), 10);
+        let saved = pool.snapshot_with(|value| *value);
+        pool.remove(original).unwrap();
+        for value in 0..20 {
+            let key = pool.insert(value);
+            for discarded in [original, replacement, appended, reused] {
+                assert_ne!(key, discarded);
+                assert!(matches!(pool.get(discarded), Err(KeyError::Stale)));
+            }
+            pool.remove(key).unwrap();
+        }
+        pool.restore(saved, pool.restore_floor().unwrap());
+        assert_eq!(*pool.get(original).unwrap(), 10);
+        check(&pool);
+    }
+
+    #[test]
+    fn rollback_floor_survives_restoring_only_older_generations() {
+        let mut pool = DensePool::default();
+        let original = pool.insert(10);
+        let first = pool.snapshot_with(|value| *value);
+        let second = pool.snapshot_with(|value| *value);
+        pool.remove(original).unwrap();
+        let discarded = pool.insert(20);
+        pool.restore(second, pool.restore_floor().unwrap());
+        let floor = pool.restore_floor().unwrap();
+        pool.restore(first, floor);
+        pool.remove(original).unwrap();
+        let replacement = pool.insert(30);
+        assert!(replacement.local.generation >= floor);
+        assert!(matches!(pool.get(discarded), Err(KeyError::Stale)));
+        check(&pool);
+    }
+
+    #[test]
+    fn rollback_exhaustion_preflight_leaves_contents_untouched() {
+        let mut pool = DensePool::default();
+        let key = pool.insert(10);
+        pool.generation_floor = u32::MAX;
+        assert_eq!(pool.restore_floor(), None);
+        assert_eq!(*pool.get(key).unwrap(), 10);
+
+        pool.generation_floor = 0;
+        pool.slots[key.local.slot as usize].generation = u32::MAX;
+        pool.keys[0].generation = u32::MAX;
+        let final_key = RawKey {
+            local: pool.keys[0],
+            ..key
+        };
+        assert_eq!(pool.restore_floor(), None);
+        assert_eq!(*pool.get(final_key).unwrap(), 10);
+        pool.remove(final_key).unwrap();
+        assert_eq!(pool.restore_floor(), None);
         check(&pool);
     }
 

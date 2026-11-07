@@ -74,6 +74,7 @@
 #[cfg(test)]
 extern crate self as fagra;
 
+mod checkpoint;
 mod covariance;
 mod dense;
 mod dense_schur;
@@ -98,6 +99,7 @@ mod variable;
 #[cfg(feature = "test-support")]
 pub mod testing;
 
+pub use checkpoint::{GraphCheckpoint, GraphCheckpointError, SnapshotSchema};
 pub use covariance::{Covariance, CovarianceBlock, CovarianceOptions};
 pub use dense_schur::DenseSchur;
 pub use error::{EvaluationError, KeyError, SolverError};
@@ -126,6 +128,7 @@ pub use variable::{Jacobian, Tangent, Variable};
 /// Changes to this plumbing can affect downstream macro expansions and manual impls.
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::checkpoint::GraphSnapshotPools;
     pub use crate::covariance::{
         CovarianceBackend, CovarianceOptimizer, CovarianceWorkspace, SelectedCovariance,
     };

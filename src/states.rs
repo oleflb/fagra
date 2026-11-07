@@ -204,7 +204,7 @@ pub trait StateVisitor<R: Real = f64> {
 /// bounded by [`Real`]. Every variable must have `Scalar = R`. Declarations
 /// without a parameter use `f64`. Empty generic schemas are supported.
 ///
-/// State-only checkpoint methods are available when all listed types implement
+/// State and full-graph checkpoint capabilities are available when all listed types implement
 /// `Clone`. Schemas containing non-cloneable values still support ordinary graph operations.
 ///
 /// ```no_run
@@ -344,6 +344,9 @@ macro_rules! states {
 
         $crate::states!(@access [$name $($scalar)?] $($field: $ty,)*);
         $crate::states!(@snapshot [$name] [$($scalar)?] { $($field: $ty,)* });
+        $crate::__snapshot_schema!([$name $($scalar)?] {
+            $($field: $crate::__private::StatePool<$ty>,)*
+        });
     };
     (@access [$name:ident $($scalar:ident)?] $field:ident: $ty:ty, $($rest:tt)*) => {
         impl$(<$scalar: $crate::Real>)? $crate::__private::PoolAccess<$crate::__private::StatePool<$ty>> for $name$(<$scalar>)? {

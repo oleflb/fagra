@@ -276,4 +276,8 @@ fn conditional_capability_handles_many_families_and_colliding_field_names() {
     graph.set(last, Tagged::identity()).unwrap();
     graph.restore_states(checkpoint).unwrap();
     assert_eq!(graph.get(last).unwrap().label, "last family");
+    let checkpoint = graph.checkpoint();
+    graph.set(last, Tagged::identity()).unwrap();
+    graph.restore(checkpoint).unwrap();
+    assert_eq!(graph.get(last).unwrap().label, "last family");
 }

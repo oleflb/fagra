@@ -51,6 +51,29 @@ impl<S: StateSchema, F: FactorSchema<S, Scalar = S::Scalar>> TrackedProblem<S, F
         }
     }
 
+    /// Capture the complete graph without changing its journal.
+    pub fn checkpoint(&mut self) -> crate::GraphCheckpoint<S, F>
+    where
+        S: crate::SnapshotSchema,
+        F: crate::SnapshotSchema,
+    {
+        self.problem.checkpoint()
+    }
+
+    /// Restore a full graph checkpoint, recording a rebuild only on success.
+    pub fn restore(
+        &mut self,
+        checkpoint: crate::GraphCheckpoint<S, F>,
+    ) -> Result<(), crate::GraphCheckpointError>
+    where
+        S: crate::SnapshotSchema,
+        F: crate::SnapshotSchema,
+    {
+        self.problem.restore(checkpoint)?;
+        self.invalidate_all();
+        Ok(())
+    }
+
     /// Stop tracking and return the graph with its accepted estimates and priors.
     pub fn into_inner(self) -> Problem<S, F> {
         self.problem

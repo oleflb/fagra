@@ -8,6 +8,100 @@ use crate::{
     marginalization::Anchor,
 };
 
+/// Opaque logical state-pool contents, including historical prior anchors.
+#[doc(hidden)]
+pub struct StateGraphSnapshot<T: Variable> {
+    entries: crate::dense::DenseSnapshot<T>,
+    anchors: Vec<Anchor<T>>,
+}
+
+impl<T: Variable + Clone> crate::SnapshotSchema for StatePool<T> {
+    type Snapshot = StateGraphSnapshot<T>;
+
+    fn snapshot_graph(&self) -> Self::Snapshot {
+        assert!(!self.trial_active);
+        StateGraphSnapshot {
+            entries: self.entries.snapshot_with(Clone::clone),
+            anchors: self.anchors.clone(),
+        }
+    }
+
+    fn preflight_restore(&self) -> Result<(), crate::GraphCheckpointError> {
+        crate::checkpoint::floor(&self.entries).map(|_| ())
+    }
+
+    fn restore_graph(&mut self, snapshot: Self::Snapshot) {
+        let floor = self
+            .entries
+            .restore_floor()
+            .expect("preflighted state pool");
+        self.entries.restore(snapshot.entries, floor);
+        self.anchors = snapshot.anchors;
+        self.reject_trial();
+    }
+}
+
+/// Opaque logical ordinary-factor contents.
+#[doc(hidden)]
+pub struct FactorGraphSnapshot<T>(crate::dense::DenseSnapshot<T>);
+
+impl<T: Clone> crate::SnapshotSchema for FactorPool<T> {
+    type Snapshot = FactorGraphSnapshot<T>;
+
+    fn snapshot_graph(&self) -> Self::Snapshot {
+        FactorGraphSnapshot(self.entries.snapshot_with(Clone::clone))
+    }
+
+    fn preflight_restore(&self) -> Result<(), crate::GraphCheckpointError> {
+        crate::checkpoint::floor(&self.entries).map(|_| ())
+    }
+
+    fn restore_graph(&mut self, snapshot: Self::Snapshot) {
+        let floor = self
+            .entries
+            .restore_floor()
+            .expect("preflighted factor pool");
+        self.entries.restore(snapshot.0, floor);
+    }
+}
+
+/// Opaque logical models, payloads and batch directory contents.
+#[doc(hidden)]
+pub struct BatchGraphSnapshot<B, P> {
+    batches: crate::dense::DenseSnapshot<Batch<B, P>>,
+    locations: crate::dense::DenseSnapshot<FactorLocation>,
+}
+
+impl<B: Clone, P: Clone> crate::SnapshotSchema for BatchPool<B, P> {
+    type Snapshot = BatchGraphSnapshot<B, P>;
+
+    fn snapshot_graph(&self) -> Self::Snapshot {
+        BatchGraphSnapshot {
+            batches: self.batches.snapshot_with(Clone::clone),
+            locations: self.locations.snapshot_with(Clone::clone),
+        }
+    }
+
+    fn preflight_restore(&self) -> Result<(), crate::GraphCheckpointError> {
+        crate::checkpoint::floor(&self.batches)?;
+        crate::checkpoint::floor(&self.locations)?;
+        Ok(())
+    }
+
+    fn restore_graph(&mut self, snapshot: Self::Snapshot) {
+        let batches = self
+            .batches
+            .restore_floor()
+            .expect("preflighted batch pool");
+        let locations = self
+            .locations
+            .restore_floor()
+            .expect("preflighted payload pool");
+        self.batches.restore(snapshot.batches, batches);
+        self.locations.restore(snapshot.locations, locations);
+    }
+}
+
 /// Direct access to one concrete pool in a macro-generated schema.
 ///
 /// The pool type selects the field at compile time. This is internal macro
@@ -295,6 +389,7 @@ impl<T> FactorPool<T> {
 }
 
 /// One batch instance's shared model and contiguous payload storage.
+#[derive(Clone)]
 struct Batch<B, P> {
     model: B,
     values: Vec<P>,

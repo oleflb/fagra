@@ -266,6 +266,11 @@ pub trait FactorVisitor<S, R: Real = f64> {
 /// bounded by [`Real`]. All ordinary and batched evaluators must have `Scalar = R`.
 /// Declarations without a parameter use `f64`; payloads need no scalar trait.
 ///
+/// Full graph checkpoints are available when all ordinary factors, batch models
+/// and payloads implement `Clone`. Cloning must independently preserve mutable
+/// evaluation data; see [`crate::GraphCheckpoint`]. Schema declarations and ordinary
+/// graph operations impose no `Clone` bounds and perform no snapshot work.
+///
 /// ```no_run
 /// use fagra::factors;
 /// # struct PosePrior;
@@ -335,6 +340,8 @@ macro_rules! factors {
                 ::core::result::Result::Ok(())
             }
         }
+
+        $crate::__snapshot_schema!([$name $($scalar)?] { $($field: $pool,)* });
     };
     (@parse [$($header:tt)*] [$($scalar:ident)?] [$real:ty] [$($fields:tt)*] [$($bounds:tt)*]
         [$($visits:tt)*]; , $($rest:tt)*
