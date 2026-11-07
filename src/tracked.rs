@@ -187,6 +187,23 @@ impl<S: StateSchema, F: FactorSchema<S, Scalar = S::Scalar>> TrackedProblem<S, F
         Ok(report)
     }
 
+    /// Evaluate fresh covariance with typed block access, without changing estimates.
+    pub fn joint_covariance_view(
+        &mut self,
+        blocks: &[BlockId],
+    ) -> Result<crate::Covariance<'_, S::Scalar>, SolverError> {
+        self.problem.joint_covariance_view(blocks)
+    }
+
+    /// Evaluate a covariance view with explicit rank controls.
+    pub fn joint_covariance_view_with(
+        &mut self,
+        blocks: &[BlockId],
+        options: &crate::CovarianceOptions<S::Scalar>,
+    ) -> Result<crate::Covariance<'_, S::Scalar>, SolverError> {
+        self.problem.joint_covariance_view_with(blocks, options)
+    }
+
     /// Evaluate fresh covariance without changing accepted estimates.
     pub fn joint_covariance(
         &mut self,
@@ -222,6 +239,16 @@ mod sealed {
 /// Access to a tracked problem invalidates numerical caches before optimization.
 pub trait BatchProblem<S: StateSchema, F>: sealed::Sealed {
     #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    fn run_batch_with_covariance_view<O: crate::covariance::CovarianceOptimizer<S, F>>(
+        &mut self,
+        solver: &mut O,
+        options: &OptimizeOptions<S::Scalar>,
+        blocks: &[BlockId],
+        covariance_options: &crate::CovarianceOptions<S::Scalar>,
+    ) -> Result<(OptimizeReport<S::Scalar>, crate::Covariance<'_, S::Scalar>), SolverError>;
+
+    #[doc(hidden)]
     fn run_batch<O: Optimizer<S, F>>(
         &mut self,
         solver: &mut O,
@@ -240,6 +267,16 @@ pub trait BatchProblem<S: StateSchema, F>: sealed::Sealed {
 }
 
 impl<S: StateSchema, F: FactorSchema<S, Scalar = S::Scalar>> BatchProblem<S, F> for Problem<S, F> {
+    fn run_batch_with_covariance_view<O: crate::covariance::CovarianceOptimizer<S, F>>(
+        &mut self,
+        solver: &mut O,
+        options: &OptimizeOptions<S::Scalar>,
+        blocks: &[BlockId],
+        covariance_options: &crate::CovarianceOptions<S::Scalar>,
+    ) -> Result<(OptimizeReport<S::Scalar>, crate::Covariance<'_, S::Scalar>), SolverError> {
+        self.optimize_with_covariance_view(solver, options, blocks, covariance_options)
+    }
+
     fn run_batch_with_covariance<O: crate::covariance::CovarianceOptimizer<S, F>>(
         &mut self,
         solver: &mut O,
@@ -261,6 +298,18 @@ impl<S: StateSchema, F: FactorSchema<S, Scalar = S::Scalar>> BatchProblem<S, F> 
 impl<S: StateSchema, F: FactorSchema<S, Scalar = S::Scalar>> BatchProblem<S, F>
     for TrackedProblem<S, F>
 {
+    fn run_batch_with_covariance_view<O: crate::covariance::CovarianceOptimizer<S, F>>(
+        &mut self,
+        solver: &mut O,
+        options: &OptimizeOptions<S::Scalar>,
+        blocks: &[BlockId],
+        covariance_options: &crate::CovarianceOptions<S::Scalar>,
+    ) -> Result<(OptimizeReport<S::Scalar>, crate::Covariance<'_, S::Scalar>), SolverError> {
+        self.invalidate_all();
+        self.problem
+            .optimize_with_covariance_view(solver, options, blocks, covariance_options)
+    }
+
     fn run_batch_with_covariance<O: crate::covariance::CovarianceOptimizer<S, F>>(
         &mut self,
         solver: &mut O,

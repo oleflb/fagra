@@ -230,6 +230,24 @@ impl<B: LeastSquaresBackend> LevenbergMarquardt<B> {
         problem.run_batch_with_covariance(self, options, blocks, covariance_options)
     }
 
+    /// Solve and borrow typed covariance blocks from the final undamped model.
+    /// Uses the same final-model reuse as [`Self::solve_batch_with_covariance`].
+    #[allow(clippy::type_complexity)]
+    pub fn solve_batch_with_covariance_view<'a, S, F>(
+        &mut self,
+        problem: &'a mut impl crate::BatchProblem<S, F>,
+        options: &OptimizeOptions<S::Scalar>,
+        blocks: &[crate::BlockId],
+        covariance_options: &crate::CovarianceOptions<S::Scalar>,
+    ) -> Result<(OptimizeReport<S::Scalar>, crate::Covariance<'a, S::Scalar>), SolverError>
+    where
+        S: StateSchema,
+        F: FactorSchema<S, Scalar = S::Scalar>,
+        B: crate::covariance::CovarianceBackend<Scalar = S::Scalar>,
+    {
+        problem.run_batch_with_covariance_view(self, options, blocks, covariance_options)
+    }
+
     /// Solve an ordinary or tracked problem, retaining this solver's workspace.
     pub fn solve_batch<S, F>(
         &mut self,

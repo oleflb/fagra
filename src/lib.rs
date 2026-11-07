@@ -98,7 +98,7 @@ mod variable;
 #[cfg(feature = "test-support")]
 pub mod testing;
 
-pub use covariance::CovarianceOptions;
+pub use covariance::{Covariance, CovarianceBlock, CovarianceOptions};
 pub use dense_schur::DenseSchur;
 pub use error::{EvaluationError, KeyError, SolverError};
 pub use factors::{Factor, FactorBatch, FactorSelection};

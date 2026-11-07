@@ -25,6 +25,7 @@ pub struct Problem<S: StateSchema, F> {
     priors: Priors<S::Scalar>,
     marginalizer: Marginalizer<S::Scalar>,
     covariance: crate::covariance::CovarianceWorkspace<S::Scalar>,
+    covariance_blocks: Vec<crate::CovarianceBlock>,
 }
 
 impl<S, F> Problem<S, F>
@@ -41,6 +42,7 @@ where
             priors: Priors::default(),
             marginalizer: Marginalizer::default(),
             covariance: crate::covariance::CovarianceWorkspace::default(),
+            covariance_blocks: Vec::new(),
         }
     }
 
@@ -296,6 +298,51 @@ where
         Ok(self.covariance.selected.matrix())
     }
 
+    /// Selected covariance with typed block access and retained metadata storage.
+    ///
+    /// Shares the numerical and borrowing contract of [`Self::joint_covariance`].
+    /// Metadata is prepared only on view paths; warmed calls reuse its allocation.
+    pub fn joint_covariance_view(
+        &mut self,
+        blocks: &[BlockId],
+    ) -> Result<crate::Covariance<'_, S::Scalar>, SolverError> {
+        self.joint_covariance_view_with(blocks, &Default::default())
+    }
+
+    /// Selected covariance view with explicit numerical rank controls.
+    pub fn joint_covariance_view_with(
+        &mut self,
+        blocks: &[BlockId],
+        options: &crate::CovarianceOptions<S::Scalar>,
+    ) -> Result<crate::Covariance<'_, S::Scalar>, SolverError> {
+        self.joint_covariance_with(blocks, options)?;
+        self.covariance_view(blocks)
+    }
+
+    fn covariance_view(
+        &mut self,
+        blocks: &[BlockId],
+    ) -> Result<crate::Covariance<'_, S::Scalar>, SolverError> {
+        crate::covariance::prepare_blocks(&mut self.states, blocks, &mut self.covariance_blocks)?;
+        Ok(crate::Covariance {
+            matrix: self.covariance.selected.matrix(),
+            blocks: &self.covariance_blocks,
+        })
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn optimize_with_covariance_view<O: crate::covariance::CovarianceOptimizer<S, F>>(
+        &mut self,
+        method: &mut O,
+        options: &OptimizeOptions<S::Scalar>,
+        blocks: &[BlockId],
+        covariance_options: &crate::CovarianceOptions<S::Scalar>,
+    ) -> Result<(OptimizeReport<S::Scalar>, crate::Covariance<'_, S::Scalar>), SolverError> {
+        let (report, _) =
+            self.optimize_with_covariance(method, options, blocks, covariance_options)?;
+        Ok((report, self.covariance_view(blocks)?))
+    }
+
     /// Optimize and extract selected covariance from the final undamped model.
     ///
     /// Reuses final Jacobians (and dense Cholesky when available) within this call.
@@ -434,6 +481,19 @@ impl<S: StateSchema, F: FactorSchema<S, Scalar = S::Scalar>> Solver<S, F> {
     ) -> Result<(OptimizeReport<S::Scalar>, faer::MatRef<'_, S::Scalar>), SolverError> {
         self.problem
             .optimize_with_covariance(method, options, blocks, covariance_options)
+    }
+
+    /// Optimize and borrow typed covariance blocks from the final undamped model.
+    #[allow(clippy::type_complexity)]
+    pub fn optimize_with_covariance_view<O: crate::covariance::CovarianceOptimizer<S, F>>(
+        &mut self,
+        method: &mut O,
+        options: &OptimizeOptions<S::Scalar>,
+        blocks: &[BlockId],
+        covariance_options: &crate::CovarianceOptions<S::Scalar>,
+    ) -> Result<(OptimizeReport<S::Scalar>, crate::Covariance<'_, S::Scalar>), SolverError> {
+        self.problem
+            .optimize_with_covariance_view(method, options, blocks, covariance_options)
     }
 
     /// Construct an empty graph and its default optimizer.

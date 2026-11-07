@@ -9,6 +9,9 @@ use fagra::{
 mod example;
 use example::{Difference, Prior, Scalar, States};
 
+#[path = "support/allocations.rs"]
+mod allocations;
+
 struct Edge<R: Real>(Difference<R>);
 impl<R: Real, S: StateStore<Scalar<R>>> FactorBatch<S> for Batch<R> {
     type Scalar = R;
@@ -121,6 +124,15 @@ fn selected_inverse_matches_reference_and_marginalized_history() {
                     assert!((cov[(i, k)] - inverse[(row, col)]).abs() < tolerance);
                 }
             }
+            let view = graph
+                .joint_covariance_view(&[q.block_id(), z.block_id()])
+                .unwrap();
+            assert!((view.block(z, q).unwrap()[(0, 0)] - inverse[(2, 3)]).abs() < tolerance);
+            assert_eq!(
+                view.block(z, z).unwrap().as_ptr(),
+                &view.matrix()[(1, 1)] as *const R
+            );
+            assert!(matches!(view.block(x, q), Err(KeyError::Unknown)));
             if stage == 0 {
                 graph.marginalize(&[x.block_id()]).unwrap();
                 assert!(matches!(graph.set(x, Scalar(c(99.))), Err(KeyError::Stale)));
@@ -262,6 +274,19 @@ fn gn_refreshes_only_when_termination_leaves_a_stale_model() {
         let x = graph.get(key).unwrap().0;
         assert!((variance - 1. / (4. * x * x)).abs() < 1e-12);
         assert_eq!(calls.get(), calls_expected);
+        graph.set(key, Scalar(initial)).unwrap();
+        calls.set(0);
+        let (report, view) = graph
+            .optimize_with_covariance_view(
+                &mut GaussNewton::default(),
+                &options,
+                &[key.block_id()],
+                &Default::default(),
+            )
+            .unwrap();
+        assert_eq!(report.termination, reason);
+        assert_eq!(view.block(key, key).unwrap()[(0, 0)], variance);
+        assert_eq!(calls.get(), calls_expected);
         graph.set(key, Scalar(4.)).unwrap();
         assert!(
             (graph.joint_covariance(&[key.block_id()]).unwrap()[(0, 0)] - 1. / 64.).abs() < 1e-12
@@ -291,4 +316,76 @@ fn covariance_failure_preserves_successfully_optimized_state() {
         Err(SolverError::SingularInformation)
     ));
     assert!((graph.get(x).unwrap().0 - 1.).abs() < 1e-7);
+}
+
+#[test]
+fn typed_views_reuse_final_models_and_allocations_on_tracked_problems() {
+    use fagra::{LevenbergMarquardt, Problem, ProblemChange, TrackedProblem};
+    let mut graph = Problem::<States<f64>, Curves>::new();
+    let key = graph.add(Scalar(2.));
+    let foreign = Problem::<States<f64>, Curves>::new().add(Scalar(2.));
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+    graph
+        .add_factor(Square {
+            key,
+            calls: calls.clone(),
+        })
+        .unwrap();
+    let mut graph = TrackedProblem::new(graph);
+    let mut gn = GaussNewton::default();
+    let mut lm = LevenbergMarquardt::default();
+    let blocks = [key.block_id()];
+    let options = Default::default();
+    let covariance_options = Default::default();
+    for warm in [true, false] {
+        for method in 0..3 {
+            calls.set(0);
+            let (_, count, _) = allocations::measured(|| {
+                let view = match method {
+                    0 => graph
+                        .joint_covariance_view_with(&blocks, &covariance_options)
+                        .unwrap(),
+                    1 => {
+                        gn.solve_batch_with_covariance_view(
+                            &mut graph,
+                            &options,
+                            &blocks,
+                            &covariance_options,
+                        )
+                        .unwrap()
+                        .1
+                    }
+                    _ => {
+                        lm.solve_batch_with_covariance_view(
+                            &mut graph,
+                            &options,
+                            &blocks,
+                            &covariance_options,
+                        )
+                        .unwrap()
+                        .1
+                    }
+                };
+                assert_eq!(view.block(key, key).unwrap()[(0, 0)], 1. / 16.);
+                assert!(matches!(view.block(key, foreign), Err(KeyError::Unknown)));
+                assert!(matches!(view.block(foreign, key), Err(KeyError::Unknown)));
+            });
+            assert_eq!(calls.get(), 1, "view must not relinearize the final model");
+            if !warm {
+                assert_eq!(count, 0, "warmed view path {method} allocated");
+            }
+        }
+    }
+    assert_eq!(graph.changes(), &[ProblemChange::Rebuild]);
+    assert!(matches!(
+        graph.joint_covariance_view(&[foreign.block_id()]),
+        Err(SolverError::Key(KeyError::ForeignSolver))
+    ));
+    assert!(matches!(
+        graph.joint_covariance_view(&[key.block_id(), key.block_id()]),
+        Err(SolverError::DuplicateCovarianceBlock)
+    ));
+    let view = graph.joint_covariance_view(&[]).unwrap();
+    assert!(view.blocks().is_empty());
+    assert!(matches!(view.block(key, key), Err(KeyError::Unknown)));
 }

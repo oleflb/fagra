@@ -15,6 +15,123 @@ use crate::{
     states::StateSchema,
 };
 
+/// A selected variable's right-tangent coordinates in a [`Covariance`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CovarianceBlock {
+    /// Checked variable identity.
+    pub id: BlockId,
+    /// Row/column offset in the selected matrix, not the full model.
+    pub offset: usize,
+    /// Number of tangent coordinates.
+    pub dimension: usize,
+}
+
+/// Borrowed selected covariance and checked metadata in selection order.
+///
+/// Obtained through [`crate::Problem::joint_covariance_view`] or solver-side
+/// `solve_batch_with_covariance_view`. Blocks borrow the same numerical storage;
+/// neither constructing a view nor looking up a block copies matrix entries.
+///
+/// ```
+/// use fagra::{Covariance, KeyError, Real, StateKey, Variable};
+/// fn cross_covariance<'a, R: Real, Pose: Variable<Scalar = R>, Bias: Variable<Scalar = R>>(
+///     covariance: Covariance<'a, R>, pose: StateKey<Pose>, bias: StateKey<Bias>,
+/// ) -> Result<faer::MatRef<'a, R>, KeyError> {
+///     covariance.block(pose, bias)
+/// }
+/// ```
+///
+/// The view prevents mutation or reuse of the problem's borrowed storage:
+/// ```compile_fail
+/// use fagra::Problem;
+/// fagra::states! { States {} }
+/// fagra::factors! { Factors {} }
+/// let mut problem = Problem::<States, Factors>::new();
+/// let covariance = problem.joint_covariance_view(&[]).unwrap();
+/// problem.joint_covariance(&[]).unwrap();
+/// let matrix = covariance.matrix();
+/// ```
+#[derive(Clone, Copy)]
+pub struct Covariance<'a, R: Real = f64> {
+    pub(crate) matrix: MatRef<'a, R>,
+    pub(crate) blocks: &'a [CovarianceBlock],
+}
+
+impl<'a, R: Real> Covariance<'a, R> {
+    /// Borrow the complete selected matrix in selection order.
+    pub fn matrix(&self) -> MatRef<'a, R> {
+        self.matrix
+    }
+
+    /// Checked identities, offsets, and tangent dimensions in selection order.
+    pub fn blocks(&self) -> &'a [CovarianceBlock] {
+        self.blocks
+    }
+
+    /// Borrow a diagonal or cross-covariance block by typed keys.
+    ///
+    /// Any key absent from this selection (including foreign or removed keys)
+    /// returns [`crate::KeyError::Unknown`]. Lookup is linear in selected blocks.
+    pub fn block<A: crate::Variable<Scalar = R>, B: crate::Variable<Scalar = R>>(
+        &self,
+        row: crate::StateKey<A>,
+        column: crate::StateKey<B>,
+    ) -> Result<MatRef<'a, R>, crate::KeyError> {
+        let find = |id| {
+            self.blocks
+                .iter()
+                .find(|block| block.id == id)
+                .ok_or(crate::KeyError::Unknown)
+        };
+        let row = find(row.block_id())?;
+        let column = find(column.block_id())?;
+        Ok(self
+            .matrix
+            .submatrix(row.offset, column.offset, row.dimension, column.dimension))
+    }
+}
+
+pub(crate) fn prepare_blocks<S: StateSchema>(
+    states: &mut S,
+    selected: &[BlockId],
+    metadata: &mut Vec<CovarianceBlock>,
+) -> Result<(), SolverError> {
+    use faer_ext::nalgebra::DimName;
+    struct Resolve {
+        id: BlockId,
+        dimension: Result<usize, crate::KeyError>,
+    }
+    impl<R: Real> crate::states::StateVisitor<R> for Resolve {
+        type Error = std::convert::Infallible;
+        fn pool<T: crate::Variable<Scalar = R>>(
+            &mut self,
+            pool: &mut crate::storage::StatePool<T>,
+        ) -> Result<(), Self::Error> {
+            if let Some(result) = pool.validate(self.id) {
+                self.dimension = result.map(|()| T::Dim::DIM);
+            }
+            Ok(())
+        }
+    }
+    metadata.clear();
+    let mut offset = 0;
+    for &id in selected {
+        let mut resolve = Resolve {
+            id,
+            dimension: Err(crate::KeyError::ForeignSolver),
+        };
+        let Ok(()) = states.visit(&mut resolve);
+        let dimension = resolve.dimension?;
+        metadata.push(CovarianceBlock {
+            id,
+            offset,
+            dimension,
+        });
+        offset += dimension;
+    }
+    Ok(())
+}
+
 /// Numerical controls for selected, undamped inverse-information covariance.
 #[derive(Debug, Clone, Copy)]
 pub struct CovarianceOptions<R: Real = f64> {
@@ -312,6 +429,43 @@ mod tests {
                     assert!((cov[(i, k)] - reference[(row, col)]).abs() < 1e-12);
                 }
             }
+            let view = if marginalized {
+                graph
+                    .optimize_with_covariance_view(
+                        &mut method,
+                        &Default::default(),
+                        &selected,
+                        &Default::default(),
+                    )
+                    .unwrap()
+                    .1
+            } else {
+                graph.joint_covariance_view(&selected).unwrap()
+            };
+            assert_eq!(
+                view.blocks()
+                    .iter()
+                    .map(|b| (b.id, b.offset, b.dimension))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (end.block_id(), 0, 9),
+                    (start.block_id(), 9, 9),
+                    (alignment.block_id(), 18, 3)
+                ]
+            );
+            let cross = view.block(alignment, start).unwrap();
+            assert_eq!(cross.shape(), (3, 9));
+            assert_eq!(cross.as_ptr(), &view.matrix()[(18, 9)] as *const f64);
+            for i in 0..3 {
+                for k in 0..9 {
+                    assert!((cross[(i, k)] - reference[(18 + i, k)]).abs() < 1e-12);
+                    assert_eq!(cross[(i, k)], view.block(start, alignment).unwrap()[(k, i)]);
+                }
+            }
+            assert!(matches!(
+                view.block(nuisance, start),
+                Err(crate::KeyError::Unknown)
+            ));
         }
     }
 }
